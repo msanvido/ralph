@@ -1,0 +1,328 @@
+"""Memory: extract durable lessons after each iteration; surface relevant ones before the next.
+
+Storage layout (mirrors workspace/tools/ — one file per item):
+
+  workspace/memory/
+    worked/
+      _index.py          INDEX = [{"id": "...", "description": "..."}, ...]
+      <slug>.py          MEMORY = {"description": "...", "prompt": "..."}
+    failed/...
+    recipes/...
+
+`description` is short — used for selection / discovery.
+`prompt` is the full lesson — loaded into context only when the lesson is selected.
+"""
+import json
+import re
+from pathlib import Path
+
+import config
+from tools import LRUStore, load_py_module, to_openai_tool, write_py_literal
+
+MEMORY_CATEGORIES = ("worked", "failed", "recipes")
+MEMORY_LRU_LIMIT = 100  # max total lessons across all categories
+
+
+# === Slug + file helpers ===
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    return (s[:max_len] or "lesson").rstrip("_")
+
+
+def _lesson_source(description: str, prompt: str) -> str:
+    return (
+        "MEMORY = {\n"
+        f"    \"description\": {json.dumps(description)},\n"
+        f"    \"prompt\": {json.dumps(prompt)},\n"
+        "}\n"
+    )
+
+
+def _write_index(path: Path, index: list[dict]) -> None:
+    write_py_literal(path, "INDEX", index)
+
+
+def load_index(category: str) -> list[dict]:
+    """Read the per-category index. Returns [{"id", "description"}, ...] or []."""
+    path = config.MEMORY_DIR / category / "_index.py"
+    if not path.exists():
+        return []
+    module = load_py_module(f"_ralph_index_{category}", path)
+    if module is None:
+        return []
+    index = getattr(module, "INDEX", None)
+    return index if isinstance(index, list) else []
+
+
+def load_lesson(category: str, lesson_id: str) -> dict | None:
+    """Read a single lesson file. Returns {"description", "prompt"} or None."""
+    path = config.MEMORY_DIR / category / f"{lesson_id}.py"
+    if not path.exists():
+        return None
+    module = load_py_module(f"_ralph_memory_{category}_{lesson_id}", path)
+    if module is None:
+        return None
+    mem = getattr(module, "MEMORY", None)
+    if not isinstance(mem, dict):
+        return None
+    return mem
+
+
+def add_lesson(category: str, description: str, prompt: str) -> str | None:
+    """Write a new lesson file and update the category index. Returns the slug, or None.
+    Also bumps the lesson's LRU timestamp and evicts oldest lessons if over the cap."""
+    if category not in MEMORY_CATEGORIES:
+        return None
+    description = description.strip()
+    prompt = prompt.strip()
+    if not description or not prompt:
+        return None
+    cat_dir = config.MEMORY_DIR / category
+    cat_dir.mkdir(parents=True, exist_ok=True)
+
+    base = _slugify(description)
+    lesson_id = base
+    n = 2
+    while (cat_dir / f"{lesson_id}.py").exists():
+        lesson_id = f"{base}_{n}"
+        n += 1
+
+    (cat_dir / f"{lesson_id}.py").write_text(_lesson_source(description, prompt))
+
+    index = load_index(category)
+    index.append({"id": lesson_id, "description": description})
+    _write_index(cat_dir / "_index.py", index)
+
+    _touch_memory(f"{category}:{lesson_id}")
+    _evict_memory_if_needed()
+    return lesson_id
+
+
+# === LRU eviction (cap total lessons at MEMORY_LRU_LIMIT) ===
+
+_MEMORY_LRU = LRUStore(lambda: config.MEMORY_DIR / "_lru.py")
+
+
+def _touch_memory(catalog_id: str) -> None:
+    _MEMORY_LRU.touch(catalog_id)
+
+
+def _delete_lesson(catalog_id: str) -> None:
+    cat, lesson_id = catalog_id.split(":", 1)
+    cat_dir = config.MEMORY_DIR / cat
+    (cat_dir / f"{lesson_id}.py").unlink(missing_ok=True)
+    index = [e for e in load_index(cat) if e.get("id") != lesson_id]
+    _write_index(cat_dir / "_index.py", index)
+
+
+def _evict_memory_if_needed() -> list[str]:
+    """If total lesson count > MEMORY_LRU_LIMIT, evict oldest. Returns evicted catalog_ids."""
+    items = read_memory_items()
+    if len(items) <= MEMORY_LRU_LIMIT:
+        return []
+    lru = _MEMORY_LRU.load()
+    pairs = sorted(((cid, lru.get(cid, 0.0)) for cid, _, _ in items), key=lambda x: x[1])
+    excess = len(items) - MEMORY_LRU_LIMIT
+    evicted: list[str] = []
+    for cid, _ts in pairs[:excess]:
+        _delete_lesson(cid)
+        lru.pop(cid, None)
+        evicted.append(cid)
+    if evicted:
+        _MEMORY_LRU.save(lru)
+        print(f"  🗑️  evicted {len(evicted)} memory lesson(s) (LRU)")
+    return evicted
+
+
+# === Catalog (used by select_relevant_memories) ===
+
+def read_memory_items() -> list[tuple[str, str, str]]:
+    """Return (catalog_id, category, description) for every lesson across all categories.
+    catalog_id is "<category>:<slug>" — stable, descriptive."""
+    items: list[tuple[str, str, str]] = []
+    for cat in MEMORY_CATEGORIES:
+        for entry in load_index(cat):
+            lesson_id = entry.get("id")
+            description = entry.get("description")
+            if lesson_id and description:
+                items.append((f"{cat}:{lesson_id}", cat, description))
+    return items
+
+
+def append_memory(learnings: dict) -> int:
+    """Persist new lessons. Each category contains a list of {description, prompt} dicts."""
+    total = 0
+    for cat in MEMORY_CATEGORIES:
+        for entry in (learnings.get(cat) or []):
+            if not isinstance(entry, dict):
+                continue
+            if add_lesson(cat, entry.get("description", ""), entry.get("prompt", "")):
+                total += 1
+    return total
+
+
+# === Transcript formatting ===
+
+def format_transcript(messages: list[dict]) -> str:
+    lines: list[str] = []
+    for m in messages:
+        role = m["role"].upper()
+        content = m.get("content")
+        if role == "TOOL":
+            text = str(content or "")
+            if len(text) > 200:
+                text = text[:197] + "..."
+            lines.append(f"  TOOL_RESULT[{m.get('tool_call_id')}] {text}")
+            continue
+        if content:
+            lines.append(f"{role}: {str(content).strip()}")
+        for tc in m.get("tool_calls") or []:
+            fn = tc["function"]
+            args = fn.get("arguments") or "{}"
+            if len(args) > 200:
+                args = args[:197] + "..."
+            lines.append(f"  TOOL_USE {fn.get('name')}({args})")
+    return "\n".join(lines)
+
+
+# === Forced-tool helper ===
+
+def _call_forced_tool(
+    *, system: str, user: str, tool: dict, tool_name: str, max_tokens: int, label: str,
+) -> dict | None:
+    try:
+        response = config.completion(
+            model=config.MODEL,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            tools=[tool],
+            tool_choice={"type": "function", "function": {"name": tool_name}},
+        )
+    except Exception as e:
+        print(f"  ⚠️  {label} failed: {type(e).__name__}: {e}")
+        return None
+    msg = response.choices[0].message
+    for tc in (msg.tool_calls or []):
+        if tc.function.name == tool_name:
+            try:
+                return json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+# === Selection ===
+
+SELECT_SYSTEM = """You pick which past lessons are relevant to the task you're about to attempt.
+You'll see a numbered catalog of lessons across three categories:
+  worked: moves that produced progress (positive reward)
+  failed: moves that wasted effort or broke (negative reward)
+  recipes: reusable mini-procedures
+Return ONLY the IDs of lessons that would actually help on THIS specific task. Skip generic
+or off-topic ones. Better to skip than to load noise. If nothing applies, pass an empty list.
+Call select_memories exactly once."""
+
+SELECT_TOOL = to_openai_tool({
+    "name": "select_memories",
+    "description": "Pick the IDs of memories that are relevant to the upcoming task.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
+        "required": ["ids"],
+    },
+})
+
+
+def select_relevant_memories(prompt: str) -> str:
+    items = read_memory_items()
+    if not items:
+        return ""
+    catalog = "\n".join(f"[{cid}] ({cat}) {desc}" for cid, cat, desc in items)
+    args = _call_forced_tool(
+        system=SELECT_SYSTEM,
+        user=f"Task:\n{prompt}\n\nMemory catalog:\n{catalog}",
+        tool=SELECT_TOOL,
+        tool_name="select_memories",
+        max_tokens=512,
+        label="memory selection",
+    ) or {}
+    selected = {s for s in (args.get("ids") or []) if isinstance(s, str)}
+    if not selected:
+        return ""
+    by_cat: dict[str, list[str]] = {cat: [] for cat in MEMORY_CATEGORIES}
+    for cid, cat, _desc in items:
+        if cid not in selected:
+            continue
+        _, lesson_id = cid.split(":", 1)
+        lesson = load_lesson(cat, lesson_id)
+        if lesson and lesson.get("prompt"):
+            _touch_memory(cid)
+            by_cat[cat].append(f"- {lesson['prompt']}")
+    sections = [f"### {cat}\n" + "\n".join(lines) for cat, lines in by_cat.items() if lines]
+    if not sections:
+        return ""
+    print(f"  📚 recalled {sum(len(v) for v in by_cat.values())} relevant lesson(s)")
+    return "## Memory from past iterations\n\n" + "\n\n".join(sections) + "\n\n---\n\n"
+
+
+# === Learn ===
+
+LEARN_SYSTEM = """You are Ralph reviewing the iteration you just completed. Extract durable
+lessons that will help in future iterations on similar tasks.
+
+Each lesson has TWO fields:
+- description: one short line — used to decide whether the lesson is relevant to a future task
+- prompt: the full lesson — what to do (or avoid), why, when, with details/examples — loaded
+  verbatim into a future iteration's context when this lesson is selected.
+
+Three buckets:
+- worked: concrete moves that produced progress (positive reward).
+- failed: moves that wasted effort, looped, or introduced bugs (negative reward).
+- recipes: reusable mini-procedures with steps.
+
+Be specific in `prompt` — don't restate the task; focus on durable advice. Skip categories
+with nothing worth recording (pass an empty list). Call record_learnings exactly once."""
+
+LEARN_TOOL = to_openai_tool({
+    "name": "record_learnings",
+    "description": "Record durable lessons. Each lesson has a short description (for selection) and a longer prompt (loaded into context when selected).",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            cat: {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["description", "prompt"],
+                },
+            } for cat in MEMORY_CATEGORIES
+        },
+        "required": list(MEMORY_CATEGORIES),
+    },
+})
+
+
+def learn_from_iteration(messages: list[dict], n: int) -> None:
+    if len(messages) <= 1:
+        return
+    args = _call_forced_tool(
+        system=LEARN_SYSTEM,
+        user=f"Iteration {n} transcript:\n\n{format_transcript(messages)}",
+        tool=LEARN_TOOL,
+        tool_name="record_learnings",
+        max_tokens=2048,
+        label="learn phase",
+    )
+    if args is None:
+        return
+    count = append_memory(args)
+    if count:
+        print(f"  📚 learned {count} new lesson(s)")
