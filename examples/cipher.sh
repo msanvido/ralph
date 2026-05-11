@@ -65,20 +65,25 @@ trap cleanup INT TERM
 
 launch() {
   local id="$1" ws="$2"
+  shift 2
   (
     "$PY" -u -m ralph \
       --workspace "$ws" \
       --prompt "$ws/prompt.md" \
       --bus-dir "$BUS" \
-      --ralph-id "$id" 2>&1 \
+      --ralph-id "$id" \
+      "$@" 2>&1 \
     | awk -v id="$id" '{ print "[" id "] " $0; fflush() }' \
     | tee "logs/$id.log"
   ) &
 }
 
+# Decoder waits for the cryptanalyst to finish building tools — otherwise its
+# first ask_ralph hits an empty inventory and the loop spins on an empty install.
 launch cryptanalyst ws_cryptanalyst
-launch decoder      ws_decoder
+launch decoder      ws_decoder --wait-for-peer cryptanalyst
 
 echo "🌈 launched 2 ralphs (cryptanalyst, decoder) sharing bus at $BUS"
+echo "   decoder will wait until cryptanalyst marks done before iterating."
 echo "   per-ralph logs in ./logs/. Ctrl-C to stop."
 wait

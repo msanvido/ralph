@@ -89,22 +89,27 @@ trap cleanup INT TERM
 
 launch() {
   local id="$1" ws="$2"
+  shift 2
   (
     "$PY" -u -m ralph \
       --workspace "$ws" \
       --prompt "$ws/prompt.md" \
       --bus-dir "$BUS" \
-      --ralph-id "$id" 2>&1 \
+      --ralph-id "$id" \
+      "$@" 2>&1 \
     | awk -v id="$id" '{ print "[" id "] " $0; fflush() }' \
     | tee "logs/$id.log"
   ) &
 }
 
+# Classifier waits for BOTH specialists to finish before asking. The watcher
+# runs in parallel — its whole purpose is to observe the others mid-flight.
 launch fib        ws_fib
 launch prime      ws_prime
-launch classifier ws_classifier
+launch classifier ws_classifier --wait-for-peer fib --wait-for-peer prime
 launch watcher    ws_watcher_multi
 
 echo "🌈 launched 4 ralphs (fib, prime, classifier, watcher) sharing bus at $BUS"
+echo "   classifier will wait until fib AND prime mark done before iterating."
 echo "   per-ralph logs in ./logs/. Ctrl-C to stop."
 wait

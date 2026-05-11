@@ -226,13 +226,28 @@ def _check_response(request_id: str) -> dict:
                 continue
             (config.TOOLS_DIR / name).write_text(source)
             installed.append({"filename": name, "bytes": len(source.encode())})
+        if installed:
+            note = (
+                "Tools were auto-installed to workspace/tools/ verbatim. The loop "
+                "reloads tools after any change, so they're callable on your very "
+                "next tool_use — no `write` needed."
+            )
+        else:
+            # Honest message: the peer returned an EMPTY files dict. Re-polling the same
+            # request_id will keep returning the same empty answer, so the agent should
+            # do something different next turn.
+            note = (
+                "Peer returned an empty `files` map — they probably haven't built a "
+                "matching tool yet, or your `description` didn't match anything they "
+                "have. Do NOT keep calling check_response with this same request_id "
+                "(the answer won't change). Either wait an iteration and ask again "
+                "with a fresh ask_ralph, try a different peer, or revise the description."
+            )
         return {
             "request_id": request_id,
             "from": response.get("from"),
             "installed_tools": installed,
-            "note": "Tools were auto-installed to workspace/tools/ verbatim. The loop "
-                    "reloads tools after any change, so they're callable on your very "
-                    "next tool_use — no `write` needed.",
+            "note": note,
         }
     return response
 

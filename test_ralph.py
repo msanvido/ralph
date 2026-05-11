@@ -1128,6 +1128,24 @@ class CheckResponseAutoInstallTests(unittest.TestCase):
         result = dispatch["solve_sudoku"](grid="123")
         self.assertEqual(result, {"solved": "123"})
 
+    def test_empty_files_dict_gives_honest_message(self):
+        """When the peer returns {files: {}} (e.g., they haven't built any tools yet),
+        the note must NOT claim 'Tools were auto-installed' and must steer the model
+        away from polling the same request_id forever."""
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {
+            "request_id": "abc", "from": "expert",
+            "answer": {"files": {}},
+            "ts": 0,
+        }
+        with patch.object(config, "bus", mock_bus):
+            result = self._call()
+        self.assertEqual(result["installed_tools"], [])
+        # Note must NOT lie about an install having happened…
+        self.assertNotIn("auto-installed", result["note"])
+        # …and must steer the agent toward something other than re-polling.
+        self.assertIn("Do NOT keep calling check_response", result["note"])
+
     def test_skips_non_py_and_private_files(self):
         mock_bus = MagicMock()
         mock_bus.check_response.return_value = {
