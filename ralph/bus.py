@@ -3,10 +3,12 @@
 Layout in BUS_DIR/:
   <id>.fifo        — POSIX named pipe; other Ralphs write request_ids here (line-delimited).
   <id>.status      — JSON status file, atomically rewritten by this Ralph each iteration.
-  req/<rid>.json   — request payload {request_id, from, to, category, ts}.
+  req/<rid>.json   — request payload {request_id, from, to, category, description, ts}.
+                    `description` is the requester's short phrase describing what they need;
+                    the receiver uses it to pick the most relevant tool/lesson to return.
   resp/<rid>.json  — response payload {request_id, from, answer, ts}. answer is shaped by
                     the receiver's fulfill_request callback (typically {files: {...}} for
-                    "tools" requests or {content: "..."} for memory categories).
+                    "tools" requests or {lessons: [...]} for memory categories).
 """
 import json
 import os
@@ -111,7 +113,7 @@ class Bus:
         except Exception as e:
             return {"error": f"unreadable status: {e}"}
 
-    def ask(self, target: str, category: str) -> dict:
+    def ask(self, target: str, category: str, description: str = "") -> dict:
         target_fifo = self.bus_dir / f"{target}.fifo"
         if not target_fifo.exists():
             return {"error": f"target ralph not running: {target}"}
@@ -121,6 +123,7 @@ class Bus:
             "from": self.id,
             "to": target,
             "category": category,
+            "description": description,
             "ts": time.time(),
         }
         (self.bus_dir / "req" / f"{request_id}.json").write_text(json.dumps(payload))

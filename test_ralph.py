@@ -308,22 +308,22 @@ class MemoryTests(unittest.TestCase):
 
     def test_append_memory_writes_lesson_files_and_index(self):
         count = memory.append_memory({
-            "worked": [self._l("call ls before reading"), self._l("use edit for surgical changes")],
-            "failed": [self._l("called a tool in the same response that created it")],
-            "recipes": [],
+            "recipes": [self._l("call ls before reading"), self._l("use edit for surgical changes")],
         })
-        self.assertEqual(count, 3)
-        worked_dir = self.mem / "worked"
-        self.assertTrue((worked_dir / "_index.py").exists())
-        self.assertTrue((worked_dir / "call_ls_before_reading.py").exists())
-        self.assertTrue((worked_dir / "use_edit_for_surgical_changes.py").exists())
-        self.assertFalse((self.mem / "recipes").exists())
+        self.assertEqual(count, 2)
+        recipes_dir = self.mem / "recipes"
+        self.assertTrue((recipes_dir / "_index.py").exists())
+        self.assertTrue((recipes_dir / "call_ls_before_reading.py").exists())
+        self.assertTrue((recipes_dir / "use_edit_for_surgical_changes.py").exists())
+        # No other category directories should be created.
+        self.assertFalse((self.mem / "worked").exists())
+        self.assertFalse((self.mem / "failed").exists())
         # Lesson file holds both fields.
-        lesson = memory.load_lesson("worked", "call_ls_before_reading")
+        lesson = memory.load_lesson("recipes", "call_ls_before_reading")
         self.assertEqual(lesson["description"], "call ls before reading")
         self.assertEqual(lesson["prompt"], "FULL: call ls before reading")
         # Index lists the lesson.
-        index = memory.load_index("worked")
+        index = memory.load_index("recipes")
         self.assertEqual(
             sorted(e["id"] for e in index),
             ["call_ls_before_reading", "use_edit_for_surgical_changes"],
@@ -331,27 +331,37 @@ class MemoryTests(unittest.TestCase):
 
     def test_append_memory_skips_empty_or_malformed_entries(self):
         count = memory.append_memory({
-            "worked": [
+            "recipes": [
                 {"description": "", "prompt": "x"},
                 {"description": "x", "prompt": ""},
                 "not-a-dict",
                 None,
                 {"description": "valid", "prompt": "valid prompt"},
             ],
-            "failed": [],
-            "recipes": [],
         })
         self.assertEqual(count, 1)
-        self.assertEqual([e["id"] for e in memory.load_index("worked")], ["valid"])
+        self.assertEqual([e["id"] for e in memory.load_index("recipes")], ["valid"])
 
     def test_append_memory_disambiguates_colliding_slugs(self):
         # Two descriptions slugify to the same id — second should get a _2 suffix.
-        memory.append_memory({"worked": [self._l("Use ls!")], "failed": [], "recipes": []})
-        memory.append_memory({"worked": [self._l("use ls?")], "failed": [], "recipes": []})
-        ids = [e["id"] for e in memory.load_index("worked")]
+        memory.append_memory({"recipes": [self._l("Use ls!")]})
+        memory.append_memory({"recipes": [self._l("use ls?")]})
+        ids = [e["id"] for e in memory.load_index("recipes")]
         self.assertEqual(ids, ["use_ls", "use_ls_2"])
-        self.assertTrue((self.mem / "worked" / "use_ls.py").exists())
-        self.assertTrue((self.mem / "worked" / "use_ls_2.py").exists())
+        self.assertTrue((self.mem / "recipes" / "use_ls.py").exists())
+        self.assertTrue((self.mem / "recipes" / "use_ls_2.py").exists())
+
+    def test_append_memory_ignores_unknown_categories(self):
+        # 'worked' and 'failed' are no longer categories — they get silently dropped.
+        count = memory.append_memory({
+            "worked": [self._l("dropped")],
+            "failed": [self._l("dropped")],
+            "recipes": [self._l("kept")],
+        })
+        self.assertEqual(count, 1)
+        self.assertEqual([e["id"] for e in memory.load_index("recipes")], ["kept"])
+        self.assertFalse((self.mem / "worked").exists())
+        self.assertFalse((self.mem / "failed").exists())
 
     def test_format_transcript_handles_openai_messages(self):
         messages = [
@@ -374,18 +384,15 @@ class MemoryTests(unittest.TestCase):
 
     def test_read_memory_items_returns_category_prefixed_ids(self):
         memory.append_memory({
-            "worked": [self._l("call ls first"), self._l("use edit")],
-            "failed": [self._l("tool same response")],
-            "recipes": [],
+            "recipes": [self._l("call ls first"), self._l("use edit")],
         })
         items = memory.read_memory_items()
         ids = [i[0] for i in items]
-        self.assertIn("worked:call_ls_first", ids)
-        self.assertIn("worked:use_edit", ids)
-        self.assertIn("failed:tool_same_response", ids)
+        self.assertIn("recipes:call_ls_first", ids)
+        self.assertIn("recipes:use_edit", ids)
         # The third element is the (short) description — not the full prompt.
         descriptions = {i[0]: i[2] for i in items}
-        self.assertEqual(descriptions["worked:call_ls_first"], "call ls first")
+        self.assertEqual(descriptions["recipes:call_ls_first"], "call ls first")
 
     def test_select_returns_empty_when_no_memory(self):
         with patch.object(config, "completion") as mock:
@@ -394,34 +401,29 @@ class MemoryTests(unittest.TestCase):
 
     def test_select_loads_full_prompts_for_chosen_ids(self):
         memory.append_memory({
-            "worked": [
+            "recipes": [
                 {"description": "ls first", "prompt": "FULL ls prompt"},
                 {"description": "use edit", "prompt": "FULL edit prompt"},
+                {"description": "argparse flow", "prompt": "FULL argparse prompt"},
             ],
-            "failed": [{"description": "same response", "prompt": "FULL fail prompt"}],
-            "recipes": [{"description": "argparse flow", "prompt": "FULL recipe prompt"}],
         })
         response = fake_response(
             tool_calls=[fake_tool_call("c", "select_memories", {
-                "ids": ["worked:ls_first", "recipes:argparse_flow"],
+                "ids": ["recipes:ls_first", "recipes:argparse_flow"],
             })],
             finish_reason="tool_calls",
         )
         with patch.object(config, "completion", return_value=response):
             preamble = memory.select_relevant_memories("write a CLI flag")
-        # Selected lessons appear via their full prompt (not just description).
+        # Selected recipes appear via their full prompt (not just description).
         self.assertIn("FULL ls prompt", preamble)
-        self.assertIn("FULL recipe prompt", preamble)
+        self.assertIn("FULL argparse prompt", preamble)
         self.assertNotIn("FULL edit prompt", preamble)
-        self.assertNotIn("FULL fail prompt", preamble)
-        self.assertIn("### worked", preamble)
-        self.assertIn("### recipes", preamble)
-        self.assertNotIn("### failed", preamble)
+        self.assertIn("Recipes from past iterations", preamble)
 
     def test_select_catalog_uses_descriptions_not_prompts(self):
         memory.append_memory({
-            "worked": [{"description": "SHORT desc", "prompt": "LONG prompt body here"}],
-            "failed": [], "recipes": [],
+            "recipes": [{"description": "SHORT desc", "prompt": "LONG prompt body here"}],
         })
         response = fake_response(
             tool_calls=[fake_tool_call("c", "select_memories", {"ids": []})],
@@ -433,13 +435,13 @@ class MemoryTests(unittest.TestCase):
             m["content"] for m in mock.call_args.kwargs["messages"] if m["role"] == "user"
         )
         self.assertIn("THE TASK", user_content)
-        self.assertIn("worked:short_desc", user_content)
+        self.assertIn("recipes:short_desc", user_content)
         self.assertIn("SHORT desc", user_content)
         # The full prompt body should NOT be in the selection catalog.
         self.assertNotIn("LONG prompt body", user_content)
 
     def test_select_swallows_api_errors(self):
-        memory.append_memory({"worked": [self._l("x")], "failed": [], "recipes": []})
+        memory.append_memory({"recipes": [self._l("x")]})
         with patch.object(config, "completion", side_effect=RuntimeError("boom")):
             self.assertEqual(memory.select_relevant_memories("task"), "")
 
@@ -451,9 +453,10 @@ class MemoryTests(unittest.TestCase):
     def test_learn_from_iteration_writes_lesson_files(self):
         response = fake_response(
             tool_calls=[fake_tool_call("c", "record_learnings", {
-                "worked": [{"description": "ls first", "prompt": "Always call ls before reading."}],
-                "failed": [],
-                "recipes": [{"description": "use edit", "prompt": "Use edit for surgical changes."}],
+                "recipes": [
+                    {"description": "ls first", "prompt": "Always call ls before reading."},
+                    {"description": "use edit", "prompt": "Use edit for surgical changes."},
+                ],
             })],
             finish_reason="tool_calls",
         )
@@ -468,13 +471,14 @@ class MemoryTests(unittest.TestCase):
                 mock.call_args.kwargs["tool_choice"],
                 {"type": "function", "function": {"name": "record_learnings"}},
             )
-        worked = memory.load_lesson("worked", "ls_first")
-        self.assertEqual(worked["description"], "ls first")
-        self.assertIn("Always call ls", worked["prompt"])
-        recipe = memory.load_lesson("recipes", "use_edit")
-        self.assertEqual(recipe["description"], "use edit")
-        self.assertIn("Use edit for surgical", recipe["prompt"])
-        # No 'failed' lessons → no failed/ directory.
+        ls_first = memory.load_lesson("recipes", "ls_first")
+        self.assertEqual(ls_first["description"], "ls first")
+        self.assertIn("Always call ls", ls_first["prompt"])
+        use_edit = memory.load_lesson("recipes", "use_edit")
+        self.assertEqual(use_edit["description"], "use edit")
+        self.assertIn("Use edit for surgical", use_edit["prompt"])
+        # Old worked/failed dirs are never created.
+        self.assertFalse((self.mem / "worked").exists())
         self.assertFalse((self.mem / "failed").exists())
 
 
@@ -575,47 +579,33 @@ class MemoryLRUTests(unittest.TestCase):
         memory._MEMORY_LRU.save(lru)
 
     def test_add_evicts_oldest_when_over_limit(self):
-        # Seed 3 lessons under the cap, manually backdate them.
-        memory.append_memory({"worked": [self._l("first"), self._l("second"), self._l("third")],
-                              "failed": [], "recipes": []})
-        self._stamp("worked:first", 100.0)
-        self._stamp("worked:second", 200.0)
-        self._stamp("worked:third", 300.0)
+        # Seed 3 recipes under the cap, manually backdate them.
+        memory.append_memory({"recipes": [self._l("first"), self._l("second"), self._l("third")]})
+        self._stamp("recipes:first", 100.0)
+        self._stamp("recipes:second", 200.0)
+        self._stamp("recipes:third", 300.0)
         # Adding a 4th triggers eviction of the oldest ('first').
-        memory.append_memory({"worked": [self._l("fourth")], "failed": [], "recipes": []})
-        ids = sorted(e["id"] for e in memory.load_index("worked"))
+        memory.append_memory({"recipes": [self._l("fourth")]})
+        ids = sorted(e["id"] for e in memory.load_index("recipes"))
         self.assertEqual(ids, ["fourth", "second", "third"])
-        self.assertFalse((self.mem / "worked" / "first.py").exists())
+        self.assertFalse((self.mem / "recipes" / "first.py").exists())
 
-    def test_eviction_works_across_categories(self):
-        # 1 in worked, 1 in failed, 1 in recipes — total 3, at the cap.
-        memory.append_memory({
-            "worked": [self._l("w1")], "failed": [self._l("f1")], "recipes": [self._l("r1")],
-        })
-        self._stamp("worked:w1", 100.0)
-        self._stamp("failed:f1", 200.0)
-        self._stamp("recipes:r1", 300.0)
-        # Adding one more should evict 'worked:w1' (oldest).
-        memory.append_memory({"worked": [self._l("w2")], "failed": [], "recipes": []})
-        all_ids = {cid for cid, _, _ in memory.read_memory_items()}
-        self.assertEqual(all_ids, {"worked:w2", "failed:f1", "recipes:r1"})
-
-    def test_select_bumps_lru_timestamp_for_selected_lessons(self):
-        memory.append_memory({"worked": [self._l("ls first")], "failed": [], "recipes": []})
-        self._stamp("worked:ls_first", 100.0)
+    def test_select_bumps_lru_timestamp_for_selected_recipes(self):
+        memory.append_memory({"recipes": [self._l("ls first")]})
+        self._stamp("recipes:ls_first", 100.0)
         response = fake_response(
-            tool_calls=[fake_tool_call("c", "select_memories", {"ids": ["worked:ls_first"]})],
+            tool_calls=[fake_tool_call("c", "select_memories", {"ids": ["recipes:ls_first"]})],
             finish_reason="tool_calls",
         )
         with patch.object(config, "completion", return_value=response):
             memory.select_relevant_memories("a task")
         lru = memory._MEMORY_LRU.load()
-        self.assertGreater(lru["worked:ls_first"], 100.0)
+        self.assertGreater(lru["recipes:ls_first"], 100.0)
 
     def test_no_eviction_when_under_limit(self):
-        memory.append_memory({"worked": [self._l("only one")], "failed": [], "recipes": []})
-        # No eviction; lesson still present.
-        self.assertEqual([e["id"] for e in memory.load_index("worked")], ["only_one"])
+        memory.append_memory({"recipes": [self._l("only one")]})
+        # No eviction; recipe still present.
+        self.assertEqual([e["id"] for e in memory.load_index("recipes")], ["only_one"])
 
 
 class SameResponseToolReloadTest(unittest.TestCase):
@@ -698,14 +688,13 @@ class PeersPreambleTests(unittest.TestCase):
 
     def test_list_my_memory_summarizes_indexes(self):
         memory.append_memory({
-            "worked": [{"description": "ls first", "prompt": "..."}],
-            "failed": [],
             "recipes": [{"description": "argparse flow", "prompt": "..."}],
         })
         out = ralph.list_my_memory()
-        self.assertEqual(out["worked"][0]["description"], "ls first")
         self.assertEqual(out["recipes"][0]["description"], "argparse flow")
-        self.assertEqual(out["failed"], [])
+        # No worked/failed keys anymore — single-category memory.
+        self.assertNotIn("worked", out)
+        self.assertNotIn("failed", out)
 
     def test_format_peers_preamble_empty_when_no_bus(self):
         with patch.object(config, "bus", None):
@@ -728,10 +717,6 @@ class PeersPreambleTests(unittest.TestCase):
             "last_text": "marked done after solver passed tests.",
             "tools": ["sudoku_solver.py", "validate.py"],
             "memory": {
-                "worked": [
-                    {"id": "mrv_heuristic", "description": "MRV picks the most-constrained cell"},
-                ],
-                "failed": [],
                 "recipes": [
                     {"id": "constraint_prop", "description": "constraint propagation across rows/cols/boxes"},
                 ],
@@ -744,7 +729,6 @@ class PeersPreambleTests(unittest.TestCase):
         self.assertIn("iteration=5", preamble)
         self.assertIn("done=True", preamble)
         self.assertIn("sudoku_solver.py", preamble)
-        self.assertIn("MRV picks the most-constrained cell", preamble)
         self.assertIn("constraint propagation", preamble)
         self.assertNotIn("### me", preamble)
 
@@ -756,14 +740,38 @@ class PeersPreambleTests(unittest.TestCase):
             "id": "verbose", "iteration": 1, "done": False, "last_text": "",
             "tools": [],
             "memory": {
-                "worked": [{"id": f"l{i}", "description": f"lesson {i}"} for i in range(15)],
-                "failed": [], "recipes": [],
+                "recipes": [{"id": f"r{i}", "description": f"recipe {i}"} for i in range(15)],
             },
         }
         with patch.object(config, "bus", mock_bus):
             preamble = ralph.format_peers_preamble()
-        self.assertIn("worked: 15", preamble)
+        self.assertIn("recipes: 15", preamble)
         self.assertIn("(+5 more)", preamble)
+
+    def test_format_peers_preamble_surfaces_expertise(self):
+        mock_bus = MagicMock()
+        mock_bus.id = "me"
+        mock_bus.list_ralphs.return_value = ["me", "expert"]
+        mock_bus.peek_ralph.return_value = {
+            "id": "expert", "iteration": 2, "done": False, "last_text": "",
+            "expertise": "Sudoku solving",
+            "tools": [], "memory": {"recipes": []},
+        }
+        with patch.object(config, "bus", mock_bus):
+            preamble = ralph.format_peers_preamble()
+        self.assertIn("expertise: Sudoku solving", preamble)
+
+    def test_format_peers_preamble_omits_expertise_when_missing(self):
+        mock_bus = MagicMock()
+        mock_bus.id = "me"
+        mock_bus.list_ralphs.return_value = ["me", "anon"]
+        mock_bus.peek_ralph.return_value = {
+            "id": "anon", "iteration": 1, "done": False, "last_text": "",
+            "tools": [], "memory": {"recipes": []},
+        }
+        with patch.object(config, "bus", mock_bus):
+            preamble = ralph.format_peers_preamble()
+        self.assertNotIn("expertise:", preamble)
 
 
 class WaitUntilDoneRemovedTest(unittest.TestCase):
@@ -924,68 +932,363 @@ class FulfillPeerRequestTests(unittest.TestCase):
             p.stop()
         self._tmp.cleanup()
 
-    def test_tools_returns_all_python_files(self):
-        (self.tools_dir / "shout.py").write_text("# shout source")
+    @staticmethod
+    def _tool_source(name: str, description: str) -> str:
+        return (
+            f'TOOL = {{"name": "{name}", "description": "{description}", '
+            f'"input_schema": {{"type": "object", "properties": {{}}}}}}\n'
+            f'def run(**kwargs):\n    return "ok"\n'
+        )
+
+    def test_tools_returns_top_k_by_description_match(self):
+        (self.tools_dir / "sudoku_solver.py").write_text(
+            self._tool_source("sudoku_solver", "Solve sudoku puzzles via backtracking"))
+        (self.tools_dir / "shout.py").write_text(
+            self._tool_source("shout", "Uppercase the input text"))
         (self.tools_dir / "_helper.py").write_text("# private")
         (self.tools_dir / "notpy.txt").write_text("ignored")
-        result = ralph.fulfill_peer_request("tools", {"from": "x"})
-        self.assertIn("shout.py", result["files"])
+        result = ralph.fulfill_peer_request(
+            "tools", {"from": "x", "description": "need a sudoku solver"},
+        )
+        # Description-matched tool ranks first; private files and non-py files are excluded.
+        self.assertIn("sudoku_solver.py", result["files"])
         self.assertNotIn("_helper.py", result["files"])
         self.assertNotIn("notpy.txt", result["files"])
-        self.assertEqual(result["files"]["shout.py"], "# shout source")
+
+    def test_tools_caps_at_top_k(self):
+        for i in range(5):
+            (self.tools_dir / f"t{i}.py").write_text(
+                self._tool_source(f"t{i}", f"tool number {i}"))
+        result = ralph.fulfill_peer_request(
+            "tools", {"from": "x", "description": "anything"},
+        )
+        self.assertLessEqual(len(result["files"]), ralph.PEER_ASK_TOP_K)
 
     def test_tools_empty_when_dir_missing(self):
         import shutil
         shutil.rmtree(self.tools_dir)
-        result = ralph.fulfill_peer_request("tools", {"from": "x"})
+        result = ralph.fulfill_peer_request(
+            "tools", {"from": "x", "description": "anything"},
+        )
         self.assertEqual(result, {"files": {}})
 
-    def test_memory_category_returns_lessons(self):
+    def test_recipes_ranked_by_description_match(self):
         memory.append_memory({
-            "worked": [
+            "recipes": [
                 {"description": "ls first", "prompt": "always call ls"},
                 {"description": "edit surgical", "prompt": "prefer edit over write"},
+                {"description": "use grep for finding code", "prompt": "grep beats find"},
+                {"description": "test before commit", "prompt": "run tests"},
             ],
-            "failed": [], "recipes": [],
         })
-        result = ralph.fulfill_peer_request("worked", {"from": "x"})
-        ids = sorted(l["id"] for l in result["lessons"])
-        self.assertEqual(ids, ["edit_surgical", "ls_first"])
-        ls_first = next(l for l in result["lessons"] if l["id"] == "ls_first")
-        self.assertEqual(ls_first["description"], "ls first")
-        self.assertEqual(ls_first["prompt"], "always call ls")
+        result = ralph.fulfill_peer_request(
+            "recipes", {"from": "x", "description": "searching for code with grep"},
+        )
+        # The grep recipe should rank first since its description shares tokens with the query.
+        self.assertGreater(len(result["lessons"]), 0)
+        self.assertEqual(result["lessons"][0]["id"], "use_grep_for_finding_code")
+        # And we never return more than top-K.
+        self.assertLessEqual(len(result["lessons"]), ralph.PEER_ASK_TOP_K)
 
-    def test_memory_category_empty_when_no_lessons(self):
-        result = ralph.fulfill_peer_request("recipes", {"from": "x"})
+    def test_recipes_returns_full_prompt(self):
+        memory.append_memory({
+            "recipes": [{"description": "ls first", "prompt": "always call ls"}],
+        })
+        result = ralph.fulfill_peer_request(
+            "recipes", {"from": "x", "description": "ls"},
+        )
+        lesson = result["lessons"][0]
+        self.assertEqual(lesson["description"], "ls first")
+        self.assertEqual(lesson["prompt"], "always call ls")
+
+    def test_recipes_empty_when_no_lessons(self):
+        result = ralph.fulfill_peer_request(
+            "recipes", {"from": "x", "description": "anything"},
+        )
         self.assertEqual(result, {"lessons": []})
 
     def test_unknown_category_returns_error(self):
-        result = ralph.fulfill_peer_request("question", {"from": "x"})
+        result = ralph.fulfill_peer_request(
+            "question", {"from": "x", "description": "anything"},
+        )
         self.assertIn("error", result)
         self.assertIn("unknown category", result["error"])
 
 
+class CheckResponseAutoInstallTests(unittest.TestCase):
+    """check_response auto-installs peer 'tools' bundles into the local TOOLS_DIR,
+    so source bytes never round-trip through the LLM (which would re-format them)."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.tools_dir = Path(self._tmp.name) / "tools"
+        self.tools_dir.mkdir()
+        self._patches = [
+            patch.object(config, "TOOLS_DIR", self.tools_dir),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def _call(self, request_id: str = "abc") -> dict:
+        return json.loads(tools_mod.handle_tool(
+            "check_response", {"request_id": request_id}, {},
+        ))
+
+    def test_pending_response_passes_through(self):
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {"request_id": "abc", "status": "pending"}
+        with patch.object(config, "bus", mock_bus):
+            result = self._call()
+        self.assertEqual(result, {"request_id": "abc", "status": "pending"})
+
+    def test_tools_answer_auto_installs_verbatim(self):
+        # The exact formatting (newlines, indentation, comments) must survive end-to-end.
+        source = (
+            'TOOL = {\n'
+            '    "name": "sudoku_solver",\n'
+            '    "description": "Solve a 9x9 sudoku given as 81 digits.",\n'
+            '    "input_schema": {"type": "object", "properties": {"grid": {"type": "string"}}},\n'
+            '}\n'
+            '\n'
+            'def run(grid: str) -> dict:\n'
+            '    # carefully crafted comment that must not be lost\n'
+            '    return {"solved": grid}\n'
+        )
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {
+            "request_id": "abc", "from": "expert",
+            "answer": {"files": {"sudoku_solver.py": source}},
+            "ts": 0,
+        }
+        with patch.object(config, "bus", mock_bus):
+            result = self._call()
+        installed = (self.tools_dir / "sudoku_solver.py").read_text()
+        self.assertEqual(installed, source)  # byte-for-byte
+        self.assertEqual(result["installed_tools"][0]["filename"], "sudoku_solver.py")
+        self.assertEqual(result["installed_tools"][0]["bytes"], len(source.encode()))
+        self.assertNotIn("files", result)  # raw source NOT echoed back to the LLM
+
+    def test_lessons_answer_passes_through_unchanged(self):
+        lessons = [{"id": "abc", "description": "x", "prompt": "do y"}]
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {
+            "request_id": "abc", "from": "expert",
+            "answer": {"lessons": lessons},
+            "ts": 0,
+        }
+        with patch.object(config, "bus", mock_bus):
+            result = self._call()
+        self.assertEqual(result["answer"]["lessons"], lessons)
+
+    def test_strips_path_components_in_filename(self):
+        # A careless or hostile peer can't escape TOOLS_DIR via a relative path.
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {
+            "request_id": "abc", "from": "expert",
+            "answer": {"files": {"../../etc/passwd.py": "EVIL = True"}},
+            "ts": 0,
+        }
+        with patch.object(config, "bus", mock_bus):
+            self._call()
+        self.assertTrue((self.tools_dir / "passwd.py").exists())
+        # Did not write outside TOOLS_DIR.
+        escaped = self.tools_dir.parent.parent / "etc" / "passwd.py"
+        self.assertFalse(escaped.exists())
+
+    def test_installed_tool_is_loadable_on_next_refresh(self):
+        """The whole point of auto-install: after check_response writes the file,
+        load_dynamic_tools() must pick it up so the model can call it directly on
+        the next tool_use. If this regressed, the LLM would invent some tool_use
+        wrapper around the missing name."""
+        source = (
+            'TOOL = {"name": "solve_sudoku", '
+            '"description": "Solve a sudoku", '
+            '"input_schema": {"type": "object", "properties": {"grid": {"type": "string"}}}}\n'
+            'def run(grid):\n    return {"solved": grid}\n'
+        )
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {
+            "request_id": "abc", "from": "expert",
+            "answer": {"files": {"solve_sudoku.py": source}},
+            "ts": 0,
+        }
+        with patch.object(config, "bus", mock_bus):
+            self._call()
+        # Now simulate the run_iteration reload: load_dynamic_tools should see the new tool.
+        schemas, dispatch, _warnings = tools_mod.load_dynamic_tools()
+        names = [s["name"] for s in schemas]
+        self.assertIn("solve_sudoku", names)
+        self.assertIn("solve_sudoku", dispatch)
+        # Sanity: the tool actually runs.
+        result = dispatch["solve_sudoku"](grid="123")
+        self.assertEqual(result, {"solved": "123"})
+
+    def test_skips_non_py_and_private_files(self):
+        mock_bus = MagicMock()
+        mock_bus.check_response.return_value = {
+            "request_id": "abc", "from": "expert",
+            "answer": {"files": {
+                "good.py": "TOOL = {}; def run(): pass",
+                "_private.py": "skipped — leading underscore",
+                "notes.txt": "skipped — wrong extension",
+            }},
+            "ts": 0,
+        }
+        with patch.object(config, "bus", mock_bus):
+            result = self._call()
+        installed_names = [t["filename"] for t in result["installed_tools"]]
+        self.assertEqual(installed_names, ["good.py"])
+        self.assertFalse((self.tools_dir / "_private.py").exists())
+        self.assertFalse((self.tools_dir / "notes.txt").exists())
+
+
 class AskRalphValidationTests(unittest.TestCase):
-    """The ask_ralph builtin rejects categories outside the allowed set before hitting the bus."""
+    """The ask_ralph builtin validates category + description before hitting the bus."""
 
     def test_rejects_unknown_category(self):
         with patch.object(config, "bus", MagicMock()) as mock_bus:
             result = json.loads(tools_mod.handle_tool(
-                "ask_ralph", {"id": "beta", "category": "anything"}, {},
+                "ask_ralph",
+                {"id": "beta", "category": "anything", "description": "need help"},
+                {},
             ))
             self.assertIn("error", result)
             self.assertIn("category must be one of", result["error"])
             mock_bus.ask.assert_not_called()
 
-    def test_passes_valid_category_to_bus(self):
+    def test_rejects_empty_description(self):
+        with patch.object(config, "bus", MagicMock()) as mock_bus:
+            result = json.loads(tools_mod.handle_tool(
+                "ask_ralph",
+                {"id": "beta", "category": "tools", "description": "   "},
+                {},
+            ))
+            self.assertIn("error", result)
+            self.assertIn("description", result["error"])
+            mock_bus.ask.assert_not_called()
+
+    def test_passes_category_and_description_to_bus(self):
         mock_bus = MagicMock()
         mock_bus.ask.return_value = {"request_id": "abc", "status": "sent"}
         with patch.object(config, "bus", mock_bus):
             result = json.loads(tools_mod.handle_tool(
-                "ask_ralph", {"id": "beta", "category": "tools"}, {},
+                "ask_ralph",
+                {"id": "beta", "category": "tools", "description": "sudoku solver"},
+                {},
             ))
         self.assertEqual(result, {"request_id": "abc", "status": "sent"})
-        mock_bus.ask.assert_called_once_with("beta", "tools")
+        mock_bus.ask.assert_called_once_with("beta", "tools", "sudoku solver")
+
+
+class WaitForPeersTests(unittest.TestCase):
+    """wait_for_peers polls config.bus.peek_ralph until each named peer reports done=True."""
+
+    def test_returns_immediately_for_empty_list(self):
+        # Should not touch the bus at all when given nothing to wait for.
+        with patch.object(config, "bus", MagicMock()) as mock_bus:
+            ralph.wait_for_peers([], poll_seconds=0.01)
+        mock_bus.peek_ralph.assert_not_called()
+
+    def test_returns_once_peer_marks_done(self):
+        mock_bus = MagicMock()
+        mock_bus.peek_ralph.side_effect = [
+            {"id": "expert", "done": False},
+            {"id": "expert", "done": False},
+            {"id": "expert", "done": True},
+        ]
+        with patch.object(config, "bus", mock_bus):
+            ralph.wait_for_peers(["expert"], poll_seconds=0.01)
+        self.assertEqual(mock_bus.peek_ralph.call_count, 3)
+
+    def test_treats_missing_status_as_not_yet_ready(self):
+        # peek_ralph returning an error dict (peer hasn't joined the bus) is not fatal —
+        # just keep polling.
+        mock_bus = MagicMock()
+        mock_bus.peek_ralph.side_effect = [
+            {"error": "no status for ralph: expert"},
+            {"id": "expert", "done": True},
+        ]
+        with patch.object(config, "bus", mock_bus):
+            ralph.wait_for_peers(["expert"], poll_seconds=0.01)
+        self.assertEqual(mock_bus.peek_ralph.call_count, 2)
+
+    def test_waits_for_all_listed_peers(self):
+        # Two peers — both must report done before wait returns.
+        mock_bus = MagicMock()
+        responses = {
+            "alpha": [{"done": False}, {"done": True}, {"done": True}],
+            "beta":  [{"done": False}, {"done": False}, {"done": True}],
+        }
+        def peek(pid):
+            return responses[pid].pop(0)
+        mock_bus.peek_ralph.side_effect = peek
+        with patch.object(config, "bus", mock_bus):
+            ralph.wait_for_peers(["alpha", "beta"], poll_seconds=0.01)
+        # Total of 5 peek calls: 2 in pass 1, 1 in pass 2 (alpha now ready, only beta polled),
+        # 1 more in pass 3 (beta still not ready), 1 in pass 4 (beta done).
+        # Actually: pass 1 sees both = 2 calls; alpha ready, removed; passes 2,3,4 each poll only
+        # beta = 3 calls; total 5.
+        self.assertEqual(mock_bus.peek_ralph.call_count, 5)
+
+
+class ValidateModelTests(unittest.TestCase):
+    """validate_model() smoke-tests the configured model and exits on misconfiguration."""
+
+    def _make_litellm_error(self, exc_class):
+        # litellm exceptions need (message, model, llm_provider) at minimum.
+        return exc_class(message="boom", model=config.MODEL, llm_provider="test")
+
+    def test_success_does_not_exit(self):
+        with patch.object(config, "completion", return_value=MagicMock()):
+            ralph.validate_model()  # must not raise SystemExit
+
+    def test_uses_forced_tool_choice(self):
+        """The ping call MUST use forced tool_choice — that's the capability we
+        actually need from any model Ralph runs against (memory + expertise both
+        depend on it). A plain completion check would let through models that
+        accept completions but reject forced tool_choice."""
+        mock_completion = MagicMock(return_value=MagicMock())
+        with patch.object(config, "completion", mock_completion):
+            ralph.validate_model()
+        call_kwargs = mock_completion.call_args.kwargs
+        self.assertIn("tools", call_kwargs)
+        self.assertIn("tool_choice", call_kwargs)
+        self.assertEqual(call_kwargs["tool_choice"]["type"], "function")
+        self.assertEqual(call_kwargs["tool_choice"]["function"]["name"], "ping")
+
+    def test_exits_on_bad_request(self):
+        import litellm
+        err = self._make_litellm_error(litellm.BadRequestError)
+        with patch.object(config, "completion", side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                ralph.validate_model()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_exits_on_auth_error(self):
+        import litellm
+        err = self._make_litellm_error(litellm.AuthenticationError)
+        with patch.object(config, "completion", side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                ralph.validate_model()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_exits_on_not_found(self):
+        import litellm
+        err = self._make_litellm_error(litellm.NotFoundError)
+        with patch.object(config, "completion", side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                ralph.validate_model()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_transient_error_is_not_fatal(self):
+        # Rate-limit-style errors should NOT exit — the main loop will retry.
+        with patch.object(config, "completion", side_effect=RuntimeError("rate limit")):
+            ralph.validate_model()  # must not raise SystemExit
 
 
 if __name__ == "__main__":

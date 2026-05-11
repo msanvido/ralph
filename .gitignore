@@ -5,6 +5,7 @@ __pycache__/
 workspace/
 ws_*/
 bus/
+bus_*/
 logs/
 benchmark/_runs/
 .claude/

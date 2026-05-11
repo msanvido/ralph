@@ -186,24 +186,22 @@ but not for *advice* ("backtracking timed out, use MRV heuristic instead").
 
 Memory ([`memory.py`](./memory.py)) fills that gap. After each iteration:
 
-1. **Learn pass** — a forced-tool LLM call asks Ralph to extract durable lessons
-   from the iteration transcript, in three buckets:
-   - `worked` — moves that produced progress (positive reward)
-   - `failed` — moves that wasted effort (negative reward)
-   - `recipes` — reusable mini-procedures with steps
+1. **Learn pass** — a forced-tool LLM call asks Ralph to extract durable **recipes**
+   from the iteration transcript. A recipe is procedural/heuristic knowledge: a
+   strategy, a decision heuristic, a when-to-use-which-approach. Anything that
+   reduces cleanly to a Python routine belongs in `workspace/tools/` as code,
+   not here as text.
 
-2. **Persist** — each lesson gets its own Python file:
+2. **Persist** — each recipe gets its own Python file:
    ```
    workspace/memory/
-   ├── worked/
-   │   ├── _index.py             # INDEX = [{id, description}, ...]
-   │   ├── ls_before_read.py     # MEMORY = {description, prompt}
-   │   └── ...
-   ├── failed/
    └── recipes/
+       ├── _index.py             # INDEX = [{id, description}, ...]
+       ├── ls_before_read.py     # MEMORY = {description, prompt}
+       └── ...
    ```
 
-   `description` is short (used for selection); `prompt` is the full lesson
+   `description` is short (used for selection); `prompt` is the full recipe
    loaded into context only when selected.
 
 Before each iteration:
@@ -225,7 +223,9 @@ Multiple Ralphs can share a `--bus-dir` and discover each other.
 
 - `bus/<id>.fifo` — POSIX named pipe carrying request IDs (line-delimited)
 - `bus/<id>.status` — JSON snapshot rewritten after each iteration
-  (`iteration`, `done`, `last_text`, `tools`, `memory` description list)
+  (`iteration`, `done`, `last_text`, `expertise`, `tools`, `memory` description list).
+  `expertise` is a one-line phrase extracted from the prompt at startup, so peers
+  know what each Ralph specializes in.
 - `bus/req/<rid>.json`, `bus/resp/<rid>.json` — request/response payloads
 
 Each Ralph runs a daemon thread that reads its own FIFO. When a request
@@ -239,15 +239,16 @@ Tools available to Ralph:
 |---|---|
 | `list_ralphs()` | IDs of all Ralphs visible on the bus |
 | `peek_ralph(id)` | A peer's last status (mtime-cached) |
-| `ask_ralph(id, category)` | Fetch from a peer. `category` ∈ `tools \| worked \| failed \| recipes`. Returns `{request_id}` immediately. |
-| `check_response(request_id)` | `{status: "pending"}` or the response payload |
+| `ask_ralph(id, category, description)` | Fetch from a peer. `category` ∈ `tools \| recipes`. `description` is what you need help with; the peer ranks their artifacts by keyword overlap with that description and returns the top 3. Returns `{request_id}` immediately. |
+| `check_response(request_id)` | `{status: "pending"}` until ready. For `tools` answers, files are auto-installed into the requester's `workspace/tools/` verbatim and the response shows `{installed_tools: [...]}` — the LLM never retypes source. Memory categories return `{answer: {lessons: [...]}}` unchanged. |
 
 **Auto-discovery preamble.** At the top of every iteration, a `## Peers on the
-bus` section is auto-prepended to the prompt, listing every other Ralph and
-their inventory (tools + lesson descriptions). The system prompt's first step
-is "if a peer has matching work, fetch theirs first." This is what turns
-discovery from "Ralph might call `list_ralphs`" into "Ralph sees peers without
-asking."
+bus` section is auto-prepended to the prompt, listing every other Ralph along
+with their declared *expertise*, tool filenames, and lesson descriptions. The
+system prompt's first step is "route asks by expertise — if a peer specializes
+in what you need, fetch from them first." This turns discovery from "Ralph
+might call `list_ralphs`" into "Ralph sees who knows what without asking,"
+and routes asks to the right peer.
 
 The trust model is cooperative: any process with filesystem access to
 `./bus/` can write requests or impersonate. Fine for cooperating peers in the
@@ -317,10 +318,13 @@ ls workspace/
 cat workspace/life.py
 ```
 
-Multi-Ralph demo (one expert, one novice asking expert for help):
+Ready-made examples in `examples/`:
 
 ```sh
-./start_demo.sh   # see start_demo.sh for the prompts it seeds
+./examples/solo.sh           # 1 Ralph implementing Conway's Game of Life
+./examples/sudoku.sh         # 2 Ralphs — expert builds a solver, novice uses it
+./examples/cipher.sh         # 2 Ralphs — description-based routing across cipher tools
+./examples/multi_expert.sh   # 4 Ralphs demonstrating expertise routing
 ```
 
 Benchmark on a HumanEval subset:

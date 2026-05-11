@@ -62,6 +62,28 @@ def user_tool_files() -> list[Path]:
     return [p for p in sorted(config.TOOLS_DIR.glob("*.py")) if not p.name.startswith("_")]
 
 
+def iter_user_tools():
+    """Yield (path, tool_def) for each user tool with a parseable TOOL = {...} dict."""
+    for p in user_tool_files():
+        module = load_py_module(f"_peer_tool_{p.stem}", p)
+        if module is None:
+            continue
+        tool_def = getattr(module, "TOOL", None)
+        if isinstance(tool_def, dict):
+            yield p, tool_def
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def score_keyword_overlap(query: str, text: str) -> int:
+    """Count distinct alphanumeric tokens (length >= 3) shared between query and text.
+    Used by peer-ask fulfillment to rank tools/lessons by relevance to a request description."""
+    def toks(s: str) -> set[str]:
+        return {t for t in _TOKEN_RE.findall(s.lower()) if len(t) >= 3}
+    return len(toks(query) & toks(text))
+
+
 # === Path helpers ===
 
 def safe_path(rel: str) -> Path:
@@ -170,17 +192,49 @@ def _peek_ralph(id: str) -> dict:
     return _require_bus().peek_ralph(id)
 
 
-PEER_SHARE_CATEGORIES = ("tools", "worked", "failed", "recipes")
+PEER_SHARE_CATEGORIES = ("tools", "recipes")
 
 
-def _ask_ralph(id: str, category: str) -> dict:
+def _ask_ralph(id: str, category: str, description: str) -> dict:
     if category not in PEER_SHARE_CATEGORIES:
         raise ValueError(f"category must be one of {list(PEER_SHARE_CATEGORIES)}; got {category!r}")
-    return _require_bus().ask(id, category)
+    description = (description or "").strip()
+    if not description:
+        raise ValueError("description must be a non-empty string describing what you need")
+    return _require_bus().ask(id, category, description)
 
 
 def _check_response(request_id: str) -> dict:
-    return _require_bus().check_response(request_id)
+    """Return the peer's response, but if it's a 'tools' answer (shape {files: {...}}),
+    write each file directly to workspace/tools/ and return a summary instead of the raw
+    source. This keeps the source bytes verbatim — the LLM never retypes them — and saves
+    the requester from a redundant `write` round-trip."""
+    response = _require_bus().check_response(request_id)
+    if response.get("status") == "pending":
+        return response
+    answer = response.get("answer")
+    if isinstance(answer, dict) and isinstance(answer.get("files"), dict):
+        config.TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+        installed: list[dict] = []
+        for filename, source in answer["files"].items():
+            if not isinstance(filename, str) or not isinstance(source, str):
+                continue
+            # Path(...).name strips any path components a careless or hostile peer might
+            # include, so an "../etc/passwd.py" can never escape TOOLS_DIR.
+            name = Path(filename).name
+            if not name.endswith(".py") or name.startswith("_"):
+                continue
+            (config.TOOLS_DIR / name).write_text(source)
+            installed.append({"filename": name, "bytes": len(source.encode())})
+        return {
+            "request_id": request_id,
+            "from": response.get("from"),
+            "installed_tools": installed,
+            "note": "Tools were auto-installed to workspace/tools/ verbatim. The loop "
+                    "reloads tools after any change, so they're callable on your very "
+                    "next tool_use — no `write` needed.",
+        }
+    return response
 
 
 # === Builtin schemas ===
@@ -279,9 +333,10 @@ BUILTIN_TOOLS = [
     {
         "name": "ask_ralph",
         "description": (
-            "Ask another Ralph to share what they learned in a category. The peer's bus "
-            "auto-fulfills from their filesystem — no manual response is needed on their "
-            "side. Returns immediately with a request_id; poll check_response on later turns."
+            "Ask another Ralph to share what they learned in a category. Include a "
+            "`description` of what you're trying to do — the peer ranks their artifacts "
+            "against it and sends back the top 3 most relevant. Returns immediately with a "
+            "request_id; poll check_response on later turns."
         ),
         "input_schema": {
             "type": "object",
@@ -291,17 +346,32 @@ BUILTIN_TOOLS = [
                     "type": "string",
                     "enum": list(PEER_SHARE_CATEGORIES),
                     "description": (
-                        "What to fetch: 'tools' (their dynamic tool source files), "
-                        "'worked'/'failed'/'recipes' (their memory markdown)."
+                        "What to fetch: 'tools' (the peer's dynamic tool source files) "
+                        "or 'recipes' (the peer's procedural/heuristic knowledge)."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "What you need help with — a short phrase or sentence "
+                        "(e.g., 'solve a sudoku puzzle', 'parse CSV with quoted commas'). "
+                        "The peer uses this to pick the best tool/lesson to send back."
                     ),
                 },
             },
-            "required": ["id", "category"],
+            "required": ["id", "category", "description"],
         },
     },
     {
         "name": "check_response",
-        "description": "Check whether your ask_ralph has been answered. Returns {status:'pending'} until the answer arrives.",
+        "description": (
+            "Check whether your ask_ralph has been answered. Returns {status:'pending'} "
+            "until the answer arrives. When the answer is a 'tools' bundle, the files "
+            "are AUTO-INSTALLED into your tools/ directory verbatim (no manual `write` "
+            "needed) and the response shows {installed_tools: [...]}; the loop reloads "
+            "tools so they're callable on your very next tool_use. The 'recipes' "
+            "category returns {answer: {lessons: [...]}} unchanged for you to read and apply."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"request_id": {"type": "string"}},

@@ -1,16 +1,18 @@
-"""Memory: extract durable lessons after each iteration; surface relevant ones before the next.
+"""Memory: extract durable recipes after each iteration; surface relevant ones before the next.
+
+Recipes are procedural/heuristic knowledge for problems that don't reduce cleanly to a single
+Python tool — multi-step strategies, when-to-use-which-approach, hard-won judgment calls.
+Anything algorithmic should be codified as a TOOL in workspace/tools/ instead.
 
 Storage layout (mirrors workspace/tools/ — one file per item):
 
   workspace/memory/
-    worked/
+    recipes/
       _index.py          INDEX = [{"id": "...", "description": "..."}, ...]
       <slug>.py          MEMORY = {"description": "...", "prompt": "..."}
-    failed/...
-    recipes/...
 
 `description` is short — used for selection / discovery.
-`prompt` is the full lesson — loaded into context only when the lesson is selected.
+`prompt` is the full recipe — loaded into context only when selected.
 """
 import json
 import re
@@ -19,7 +21,10 @@ from pathlib import Path
 from . import config
 from .tools import LRUStore, load_py_module, to_openai_tool, write_py_literal
 
-MEMORY_CATEGORIES = ("worked", "failed", "recipes")
+# Single-element tuple kept for forward compatibility with code that iterates categories
+# (load_index, fulfill_peer_request, etc.). If we ever want a finer split again, this is
+# the only place to add the new buckets.
+MEMORY_CATEGORIES = ("recipes",)
 MEMORY_LRU_LIMIT = 100  # max total lessons across all categories
 
 
@@ -215,16 +220,52 @@ def _call_forced_tool(
     return None
 
 
+# === Expertise extraction ===
+
+EXPERTISE_SYSTEM = """You are summarizing what a Ralph's task expects them to specialize in.
+Read the prompt and return a single short phrase (3-8 words) capturing the expertise area —
+the kind of work this Ralph will become good at and that other Ralphs might ask them for help on.
+
+Examples:
+  prompt about solving sudoku → "Sudoku solving"
+  prompt about scraping product pages → "Web scraping"
+  prompt about a watcher that summarizes peers → "Multi-agent observability"
+
+Skip filler words. No quotes. Call set_expertise exactly once."""
+
+EXPERTISE_TOOL = to_openai_tool({
+    "name": "set_expertise",
+    "description": "Set this Ralph's expertise as one short phrase.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"phrase": {"type": "string"}},
+        "required": ["phrase"],
+    },
+})
+
+
+def extract_expertise(prompt: str) -> str:
+    """One-shot LLM call to summarize this Ralph's expertise from its prompt. Returns ""
+    on failure — callers should treat the empty string as 'no expertise published'."""
+    args = _call_forced_tool(
+        system=EXPERTISE_SYSTEM,
+        user=f"Prompt:\n{prompt}",
+        tool=EXPERTISE_TOOL,
+        tool_name="set_expertise",
+        max_tokens=64,
+        label="expertise extraction",
+    ) or {}
+    phrase = (args.get("phrase") or "").strip()
+    return phrase
+
+
 # === Selection ===
 
-SELECT_SYSTEM = """You pick which past lessons are relevant to the task you're about to attempt.
-You'll see a numbered catalog of lessons across three categories:
-  worked: moves that produced progress (positive reward)
-  failed: moves that wasted effort or broke (negative reward)
-  recipes: reusable mini-procedures
-Return ONLY the IDs of lessons that would actually help on THIS specific task. Skip generic
-or off-topic ones. Better to skip than to load noise. If nothing applies, pass an empty list.
-Call select_memories exactly once."""
+SELECT_SYSTEM = """You pick which past recipes are relevant to the task you're about to attempt.
+You'll see a numbered catalog of recipes — reusable procedural/heuristic knowledge from
+past iterations. Return ONLY the IDs of recipes that would actually help on THIS specific
+task. Skip generic or off-topic ones. Better to skip than to load noise. If nothing applies,
+pass an empty list. Call select_memories exactly once."""
 
 SELECT_TOOL = to_openai_tool({
     "name": "select_memories",
@@ -253,7 +294,7 @@ def select_relevant_memories(prompt: str) -> str:
     selected = {s for s in (args.get("ids") or []) if isinstance(s, str)}
     if not selected:
         return ""
-    by_cat: dict[str, list[str]] = {cat: [] for cat in MEMORY_CATEGORIES}
+    recipes: list[str] = []
     for cid, cat, _desc in items:
         if cid not in selected:
             continue
@@ -261,35 +302,38 @@ def select_relevant_memories(prompt: str) -> str:
         lesson = load_lesson(cat, lesson_id)
         if lesson and lesson.get("prompt"):
             _touch_memory(cid)
-            by_cat[cat].append(f"- {lesson['prompt']}")
-    sections = [f"### {cat}\n" + "\n".join(lines) for cat, lines in by_cat.items() if lines]
-    if not sections:
+            recipes.append(f"- {lesson['prompt']}")
+    if not recipes:
         return ""
-    print(f"  📚 recalled {sum(len(v) for v in by_cat.values())} relevant lesson(s)")
-    return "## Memory from past iterations\n\n" + "\n\n".join(sections) + "\n\n---\n\n"
+    print(f"  📚 recalled {len(recipes)} relevant recipe(s)")
+    return (
+        "## Recipes from past iterations\n\n"
+        + "\n".join(recipes)
+        + "\n\n---\n\n"
+    )
 
 
 # === Learn ===
 
 LEARN_SYSTEM = """You are Ralph reviewing the iteration you just completed. Extract durable
-lessons that will help in future iterations on similar tasks.
+RECIPES — procedural/heuristic knowledge — that will help in future iterations on similar tasks.
 
-Each lesson has TWO fields:
-- description: one short line — used to decide whether the lesson is relevant to a future task
-- prompt: the full lesson — what to do (or avoid), why, when, with details/examples — loaded
-  verbatim into a future iteration's context when this lesson is selected.
+A recipe captures something that's hard to solve algorithmically: a strategy, a decision
+heuristic, a when-to-use-which-approach, hard-won judgment. Anything that boils down to a
+clean Python routine should be CODE (in workspace/tools/), not a recipe. Don't write recipes
+for trivially algorithmic things; don't write recipes that just restate the task.
 
-Three buckets:
-- worked: concrete moves that produced progress (positive reward).
-- failed: moves that wasted effort, looped, or introduced bugs (negative reward).
-- recipes: reusable mini-procedures with steps.
+Each recipe has TWO fields:
+- description: one short line — used to decide whether the recipe is relevant to a future task.
+- prompt: the full recipe — steps, when to apply, what to watch out for, with examples —
+  loaded verbatim into a future iteration's context when selected.
 
-Be specific in `prompt` — don't restate the task; focus on durable advice. Skip categories
-with nothing worth recording (pass an empty list). Call record_learnings exactly once."""
+Skip if nothing this iteration is worth distilling (pass an empty list). Call
+record_learnings exactly once."""
 
 LEARN_TOOL = to_openai_tool({
     "name": "record_learnings",
-    "description": "Record durable lessons. Each lesson has a short description (for selection) and a longer prompt (loaded into context when selected).",
+    "description": "Record durable recipes. Each recipe has a short description (for selection) and a longer prompt (loaded into context when selected).",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -325,4 +369,4 @@ def learn_from_iteration(messages: list[dict], n: int) -> None:
         return
     count = append_memory(args)
     if count:
-        print(f"  📚 learned {count} new lesson(s)")
+        print(f"  📚 learned {count} new recipe(s)")

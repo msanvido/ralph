@@ -54,14 +54,31 @@ echo "Build a tic-tac-toe game with tests, then mark_done." > prompt.md
 That's it. Ralph reads `./prompt.md`, works in `./workspace/`, learns into `./workspace/memory/`,
 and joins the bus at `./bus/` with id = workspace dir name (`workspace`).
 
-## Run 2 or 3 Ralphs that can talk to each other
+## Examples
 
-**Quick start:** `./start_demo.sh` launches all three at once, prefixes their output by id,
-and tees per-ralph logs to `./logs/`. Ctrl-C stops them all. (See the script for the prompts
-it seeds; edit `ws_*/prompt.md` after first run to customize.)
+A few ready-to-run demos live in `examples/`:
 
-The rest of this section explains what the script does manually, in case you want to run
-each Ralph in its own terminal.
+- `examples/solo.sh` — single Ralph implements Conway's Game of Life. The simplest
+  demo of the iterate-until-done loop.
+- `examples/sudoku.sh` — two Ralphs (expert + novice). The expert builds a solver
+  tool + lessons; the novice fetches the solver via `ask_ralph` to crack a puzzle.
+- `examples/cipher.sh` — two Ralphs (cryptanalyst + decoder). The cryptanalyst
+  builds three Caesar-cipher tools (encode, decode, brute-force); the decoder picks
+  the right one via `ask_ralph(..., description="...")` and recovers an unknown-shift
+  ciphertext.
+- `examples/multi_expert.sh` — four Ralphs where the novice must route asks to the
+  right specialist based on each peer's published `expertise`. Showcases
+  `ask_ralph(id, category, description)` and the top-3 description-match ranking.
+
+Each script prefixes per-Ralph output by id and tees to `logs/<id>.log`; Ctrl-C
+stops everything. Each example uses its own bus dir (`./bus_solo`, `./bus_sudoku`,
+`./bus_multi`) so they don't interfere if you run more than one. Edit
+`ws_*/prompt.md` after the first run to customize the prompts.
+
+## Run multiple Ralphs manually
+
+The rest of this section explains what `examples/sudoku.sh` does manually, in case
+you want to run each Ralph in its own terminal.
 
 The bus is a shared directory. Every Ralph that points at the same `--bus-dir` can see and
 message every other Ralph. Give each one its own workspace and prompt, and a unique id.
@@ -69,7 +86,7 @@ message every other Ralph. Give each one its own workspace and prompt, and a uni
 **Terminal 1** — an expert Ralph building sudoku expertise (solver tool + recipes):
 
 ```sh
-mkdir -p ws_expert && echo "Build a sudoku solver in tools/sudoku_solver.py and capture recipes in your memory. Mark_done when the solver passes tests and you have lessons in worked/failed/recipes." > ws_expert/prompt.md
+mkdir -p ws_expert && echo "Build a sudoku solver in tools/sudoku_solver.py and capture recipes in your memory. Mark_done when the solver passes tests and you have at least one recipe." > ws_expert/prompt.md
 .venv/bin/ralph \
   --workspace ws_expert \
   --prompt ws_expert/prompt.md \
@@ -80,7 +97,7 @@ mkdir -p ws_expert && echo "Build a sudoku solver in tools/sudoku_solver.py and 
 **Terminal 2** — a novice Ralph that asks the expert for help:
 
 ```sh
-mkdir -p ws_novice && echo "Solve this sudoku: 500080049000500030067300001150000000000208000000000018700004150030002000490050003. ask_ralph(id='expert', category='tools') to fetch their solver — returns a request_id; check_response(request_id) on the next turn. Save the expert's source under tools/<filename>.py via write, then call the freshly-loaded solver. Save the answer to solution.txt and mark_done." > ws_novice/prompt.md
+mkdir -p ws_novice && echo "Solve this sudoku: 500080049000500030067300001150000000000208000000000018700004150030002000490050003. ask_ralph(id='expert', category='tools', description='sudoku solver') to fetch their solver — returns a request_id; check_response(request_id) on the next turn. Save the expert's source under tools/<filename>.py via write, then call the freshly-loaded solver. Save the answer to solution.txt and mark_done." > ws_novice/prompt.md
 .venv/bin/ralph \
   --workspace ws_novice \
   --prompt ws_novice/prompt.md \
@@ -88,18 +105,11 @@ mkdir -p ws_novice && echo "Solve this sudoku: 500080049000500030067300001150000
   --ralph-id novice
 ```
 
-**Terminal 3** — a watcher Ralph that observes the others:
+Two Ralphs, one shared `./bus/` directory. They discover each other automatically.
 
-```sh
-mkdir -p ws_watch && echo "Every iteration, call list_ralphs and peek_ralph on each. Summarize their progress to workspace/dashboard.md." > ws_watch/prompt.md
-.venv/bin/ralph \
-  --workspace ws_watch \
-  --prompt ws_watch/prompt.md \
-  --bus-dir ./bus \
-  --ralph-id watcher
-```
-
-Three Ralphs, one shared `./bus/` directory. They discover each other automatically.
+Add more peers the same way — e.g., a watcher Ralph that just `list_ralphs()` /
+`peek_ralph(id)` each iteration and writes a dashboard. See `examples/multi_expert.sh`
+for a 4-Ralph setup with a watcher.
 
 ## What's available on the bus
 
@@ -109,7 +119,7 @@ Each Ralph sees these tools:
 |---|---|
 | `list_ralphs()` | IDs of all Ralphs that have written a status file |
 | `peek_ralph(id)` | Last status snapshot of another Ralph (iteration, last_text, done) |
-| `ask_ralph(id, category)` | Fetch a peer's filesystem artifacts. `category` ∈ `tools \| worked \| failed \| recipes`. Returns immediately with a `request_id`. The response carries `{files: {...}}` for `tools` or `{lessons: [{id, description, prompt}, ...]}` for the memory categories. |
+| `ask_ralph(id, category, description)` | Fetch a peer's filesystem artifacts. `category` ∈ `tools \| recipes`. `description` is a short phrase saying what you need help with — the peer ranks their artifacts by keyword overlap with that description and returns the top 3 most relevant. Returns immediately with a `request_id`. On `check_response`, `tools` bundles are auto-installed into the requester's `workspace/tools/` verbatim (no LLM round-trip through the source), and the response surfaces `{installed_tools: [...]}`. `recipes` return `{answer: {lessons: [{id, description, prompt}, ...]}}` unchanged. |
 | `check_response(request_id)` | Returns `{status: "pending"}` or the answer payload |
 
 Peers can only share what they have **stored on their own filesystem**: their dynamic
@@ -117,28 +127,33 @@ tools (`workspace/tools/*.py`) and their memory lessons (`workspace/memory/<cate
 The receiver's bus auto-fulfills the request — there is no manual respond step and no LLM
 round-trip on the responder side.
 
-**Auto-discovery.** Each Ralph publishes its current inventory (tool filenames + per-category
-lesson descriptions) to `bus/<id>.status` after every iteration. At the start of every
-iteration, every other Ralph's status is collected and prepended to the prompt as a
-`## Peers on the bus` section, so Ralph sees what each peer has built before deciding
-what to do. The system prompt's first step is "if a peer has matching work, fetch theirs
-via `ask_ralph` rather than reinventing." Reuse beats reinvention.
+**Auto-discovery.** Each Ralph publishes its current inventory (declared *expertise* +
+tool filenames + per-category lesson descriptions) to `bus/<id>.status` after every
+iteration. The expertise is a one-line phrase auto-extracted from the Ralph's prompt at
+startup, so peers know what each Ralph specializes in. At the start of every iteration,
+every other Ralph's status is collected and prepended to the prompt as a `## Peers on
+the bus` section. The system prompt's first step is "route asks by expertise — if a peer
+specializes in what you need, fetch from them via `ask_ralph(id, category, description)`
+before writing your own." Reuse beats reinvention.
 
-Memory layout (one file per lesson, mirroring the per-tool pattern):
+Memory layout (one file per recipe, mirroring the per-tool pattern):
 
 ```
 workspace/memory/
-├── worked/
-│   ├── _index.py                  # INDEX = [{id, description}, ...]
-│   ├── always_ls_before_read.py   # MEMORY = {description, prompt}
-│   └── ...
-├── failed/...
-└── recipes/...
+└── recipes/
+    ├── _index.py                  # INDEX = [{id, description}, ...]
+    ├── always_ls_before_read.py   # MEMORY = {description, prompt}
+    └── ...
 ```
 
-`description` is short — used for relevance selection. `prompt` is the full lesson —
-loaded into context only when the lesson is selected. `ask_ralph(id, "worked")` returns
-all `{id, description, prompt}` triples so a peer can adopt them verbatim.
+Recipes are procedural/heuristic knowledge — strategies, decision heuristics, judgment
+calls — for problems that don't reduce cleanly to a Python tool. Anything algorithmic
+belongs in `workspace/tools/` as code, not here as text.
+
+`description` is short — used for relevance selection (locally and when ranking against
+a peer's `ask_ralph` request). `prompt` is the full recipe — loaded into context only
+when selected. `ask_ralph(id, "recipes", description)` returns the top 3
+`{id, description, prompt}` triples by keyword overlap with the requester's description.
 
 ## Bus directory layout
 
@@ -187,7 +202,9 @@ want a different ceiling.
 --workspace PATH    Working dir (default: ./workspace)
 --bus-dir PATH      Shared bus dir (default: ./bus)
 --ralph-id NAME     Identity on the bus (default: workspace dir name)
---model NAME        LiteLLM model string (default: openrouter/qwen/qwen3-coder)
+--model NAME        LiteLLM model string (default: openrouter/qwen/qwen3-coder).
+                    The model MUST support forced tool_choice — Ralph's memory
+                    and expertise extraction rely on it. Validated at startup.
 ```
 
 ## Tests
