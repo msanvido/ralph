@@ -34,8 +34,8 @@ Ralph uses [LiteLLM](https://docs.litellm.ai), so any provider it supports works
 same `--model` flag. Examples:
 
 ```sh
-.venv/bin/ralph --model openrouter/deepseek/deepseek-chat-v3.1   # default
-.venv/bin/ralph --model openrouter/qwen/qwen3-coder
+.venv/bin/ralph --model openrouter/qwen/qwen3-coder              # default
+.venv/bin/ralph --model openrouter/deepseek/deepseek-chat-v3.1
 .venv/bin/ralph --model anthropic/claude-sonnet-4-6
 .venv/bin/ralph --model openai/gpt-4o
 .venv/bin/ralph --model gemini/gemini-2.0-flash
@@ -187,7 +187,7 @@ want a different ceiling.
 --workspace PATH    Working dir (default: ./workspace)
 --bus-dir PATH      Shared bus dir (default: ./bus)
 --ralph-id NAME     Identity on the bus (default: workspace dir name)
---model NAME        LiteLLM model string (default: openrouter/deepseek/deepseek-chat-v3.1)
+--model NAME        LiteLLM model string (default: openrouter/qwen/qwen3-coder)
 ```
 
 ## Tests

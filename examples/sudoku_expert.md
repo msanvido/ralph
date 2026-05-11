@@ -1,5 +1,5 @@
-Solve the following sudoku for me. If you do not know the rules search them on the internet, try solutions and feel free to backtrack and try other appraches.
-Write the proposed solution in a solution.md file
+Become an expert sudoku solver. Solve the following sudokus, but keep improving how you solve them.
+Seartch for new sudokus on the internet or even create yourslef new ones until you have the ability to solve all the gien sudokus given to you.
 ╔═══╤═══╤═══╦═══╤═══╤═══╦═══╤═══╤═══╗
 ║ 8 │ 5 │   ║   │   │ 2 ║ 4 │   │   ║
 ╟───┼───┼───╫───┼───┼───╫───┼───┼───╢
@@ -20,4 +20,31 @@ Write the proposed solution in a solution.md file
 ║   │   │   ║   │ 3 │ 6 ║   │ 4 │   ║
 ╚═══╧═══╧═══╩═══╧═══╧═══╩═══╧═══╧═══╝
 
++-----+-----+-----+
+|5    |  8  |  4 9|
+|     |5    |  3  |
+|  6 7|3    |    1|
++-----+-----+-----+
+|1 5  |     |     |
+|     |2   8|     |
+|     |     |  1 8|
++-----+-----+-----+
+|7    |    4|1 5  |
+|  3  |    2|     |
+|4 9  |  5  |    3|
++-----+-----+-----+
+
+
++-----+-----+-----+
+|5    |     |  4 9|
+|     |5    |  3  |
+|  6 7|3    |    1|
++-----+-----+-----+
+|1 5  |     |     |
+|     |2   8|     |
+|     |     |  1 8|
++-----+-----+-----+
+|7    |    4|  5  |
+|  3  |    2|     |
+|4    |  5  |    3|
 +-----+-----+-----+

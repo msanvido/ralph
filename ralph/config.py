@@ -7,13 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # LiteLLM model string. Examples:
-#   openrouter/deepseek/deepseek-chat-v3.1   (default)
-#   openrouter/qwen/qwen3-coder
+#   openrouter/qwen/qwen3-coder              (default)
+#   openrouter/deepseek/deepseek-chat-v3.1
 #   anthropic/claude-sonnet-4-6
 #   openai/gpt-4o
 #   gemini/gemini-2.0-flash
 # API keys are read from env: OPENROUTER_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY.
-MODEL = "openrouter/deepseek/deepseek-chat-v3.1"
+MODEL = "openrouter/qwen/qwen3-coder"
 MAX_ITERATIONS = 50
 
 WORKSPACE = Path("workspace")

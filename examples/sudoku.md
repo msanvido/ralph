@@ -1,6 +1,5 @@
-Solve the following sudoku for me. If you do not know the rules search them on the internet, try solutions and feel free to backtrack and try other appraches.
-Write the proposed solution in a solution.md file
-
+Solve the following sudoku for me. 
+wirte the solution to file solution.md
 +-----+-----+-----+
 |5    |  8  |  4 9|
 |     |5    |  3  |

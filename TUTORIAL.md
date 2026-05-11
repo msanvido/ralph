@@ -269,7 +269,8 @@ The model is called through [LiteLLM](https://docs.litellm.ai), which accepts
 the OpenAI-format messages/tools and translates per provider:
 
 ```sh
-ralph --model openrouter/deepseek/deepseek-chat-v3.1   # default
+ralph --model openrouter/qwen/qwen3-coder              # default
+ralph --model openrouter/deepseek/deepseek-chat-v3.1
 ralph --model anthropic/claude-sonnet-4-6
 ralph --model openai/gpt-4o
 ralph --model gemini/gemini-2.0-flash
