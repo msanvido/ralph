@@ -40,6 +40,19 @@ in the workspace right now — which is the only thing that actually matters for
 When the agent calls `mark_done`, the loop checks for `workspace/DONE` after each
 iteration and exits if present.
 
+A note on persistence. The "disk" here isn't an opaque blob — it's a tree of
+**Python source files**. Dynamic tools are `.py` modules; lessons are files with
+a `MEMORY = {...}` literal; indices are `INDEX = [...]`. The loader `importlib`s
+them, so the persisted form is the same Python objects the agent works with,
+just frozen to text — readable, diffable, hand-editable, runnable. There's no
+JSON, no pickle, no SQLite; Python source *is* the storage format.
+
+And writes are eager: every tool the agent saves, every lesson the learn-pass
+extracts, every LRU touch hits disk the moment it's produced. There's no "save
+on shutdown" or "flush at checkpoint" — a crash or `kill -9` loses nothing that
+was already done. The price is more writes; the benefit is that the entire
+state of the world is always on disk and always inspectable with `cat`.
+
 That's it. Everything below is mechanism in service of this idea.
 
 ---
@@ -74,7 +87,8 @@ def run_iteration(prompt, n):
 ```
 
 A standard tool-use loop. The crucial thing is what's *not* there: nothing carries
-state into iteration N+1 except the filesystem.
+state into iteration N+1 except files in `workspace/` — re-read (and re-imported)
+fresh every turn.
 
 See [`ralph/cli.py`](./ralph/cli.py) for the full implementation with multi-provider
 support via [LiteLLM](https://docs.litellm.ai), pretty-printing, and a few extras.
