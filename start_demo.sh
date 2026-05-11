@@ -75,7 +75,7 @@ launch() {
   local id="$1" ws="$2"
   (
     # python -u → unbuffered stdout, so output streams in real time through awk/tee.
-    "$PY" -u ralph.py \
+    "$PY" -u -m ralph \
       --workspace "$ws" \
       --prompt "$ws/prompt.md" \
       --bus-dir ./bus \

@@ -9,11 +9,11 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import config
-import memory
-import ralph
-import tools as tools_mod
-from bus import Bus
+from ralph import cli as ralph
+from ralph import config
+from ralph import memory
+from ralph import tools as tools_mod
+from ralph.bus import Bus
 
 VALID_TOOL = """
 TOOL = {

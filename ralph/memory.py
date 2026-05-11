@@ -16,8 +16,8 @@ import json
 import re
 from pathlib import Path
 
-import config
-from tools import LRUStore, load_py_module, to_openai_tool, write_py_literal
+from . import config
+from .tools import LRUStore, load_py_module, to_openai_tool, write_py_literal
 
 MEMORY_CATEGORIES = ("worked", "failed", "recipes")
 MEMORY_LRU_LIMIT = 100  # max total lessons across all categories

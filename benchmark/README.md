@@ -15,7 +15,7 @@ Each task gets its own workspace under `benchmark/_runs/humaneval_X/`. The
 runner:
 1. Writes `prompt.md` (the function signature + docstring) and
    `test_solution.py` (the canonical HumanEval `check`) into the workspace.
-2. Runs `ralph.py` as a subprocess against that workspace (timeout: 600s).
+2. Runs `python -m ralph` as a subprocess against that workspace (timeout: 600s).
 3. After Ralph marks done, runs `python test_solution.py` and grades on the
    exit code.
 

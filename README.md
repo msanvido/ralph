@@ -14,8 +14,10 @@ well — everything here is Python.
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e .
 ```
+
+This installs Ralph and exposes a `ralph` command on your `PATH` (inside the venv).
 
 Drop API keys for whichever providers you want into `.env`:
 
@@ -32,11 +34,11 @@ Ralph uses [LiteLLM](https://docs.litellm.ai), so any provider it supports works
 same `--model` flag. Examples:
 
 ```sh
-.venv/bin/python ralph.py --model openrouter/deepseek/deepseek-chat-v3.1   # default
-.venv/bin/python ralph.py --model openrouter/qwen/qwen3-coder
-.venv/bin/python ralph.py --model anthropic/claude-sonnet-4-6
-.venv/bin/python ralph.py --model openai/gpt-4o
-.venv/bin/python ralph.py --model gemini/gemini-2.0-flash
+.venv/bin/ralph --model openrouter/deepseek/deepseek-chat-v3.1   # default
+.venv/bin/ralph --model openrouter/qwen/qwen3-coder
+.venv/bin/ralph --model anthropic/claude-sonnet-4-6
+.venv/bin/ralph --model openai/gpt-4o
+.venv/bin/ralph --model gemini/gemini-2.0-flash
 ```
 
 You can mix providers across Ralphs in the demo — e.g. solver on Anthropic, watcher on
@@ -46,7 +48,7 @@ Gemini. They only need to share `--bus-dir`, not the provider.
 
 ```sh
 echo "Build a tic-tac-toe game with tests, then mark_done." > prompt.md
-.venv/bin/python ralph.py
+.venv/bin/ralph
 ```
 
 That's it. Ralph reads `./prompt.md`, works in `./workspace/`, learns into `./workspace/memory/`,
@@ -68,7 +70,7 @@ message every other Ralph. Give each one its own workspace and prompt, and a uni
 
 ```sh
 mkdir -p ws_expert && echo "Build a sudoku solver in tools/sudoku_solver.py and capture recipes in your memory. Mark_done when the solver passes tests and you have lessons in worked/failed/recipes." > ws_expert/prompt.md
-.venv/bin/python ralph.py \
+.venv/bin/ralph \
   --workspace ws_expert \
   --prompt ws_expert/prompt.md \
   --bus-dir ./bus \
@@ -79,7 +81,7 @@ mkdir -p ws_expert && echo "Build a sudoku solver in tools/sudoku_solver.py and 
 
 ```sh
 mkdir -p ws_novice && echo "Solve this sudoku: 500080049000500030067300001150000000000208000000000018700004150030002000490050003. ask_ralph(id='expert', category='tools') to fetch their solver — returns a request_id; check_response(request_id) on the next turn. Save the expert's source under tools/<filename>.py via write, then call the freshly-loaded solver. Save the answer to solution.txt and mark_done." > ws_novice/prompt.md
-.venv/bin/python ralph.py \
+.venv/bin/ralph \
   --workspace ws_novice \
   --prompt ws_novice/prompt.md \
   --bus-dir ./bus \
@@ -90,7 +92,7 @@ mkdir -p ws_novice && echo "Solve this sudoku: 500080049000500030067300001150000
 
 ```sh
 mkdir -p ws_watch && echo "Every iteration, call list_ralphs and peek_ralph on each. Summarize their progress to workspace/dashboard.md." > ws_watch/prompt.md
-.venv/bin/python ralph.py \
+.venv/bin/ralph \
   --workspace ws_watch \
   --prompt ws_watch/prompt.md \
   --bus-dir ./bus \

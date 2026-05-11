@@ -12,10 +12,10 @@ import json
 import time
 from pathlib import Path
 
-import config
-import memory
-import tools as tools_mod
-from bus import Bus
+from . import config
+from . import memory
+from . import tools as tools_mod
+from .bus import Bus
 
 SYSTEM_PROMPT = """You are Ralph (yes, the Wreck-It one). You wreck empty workspaces into working
 code, one iteration at a time. Everything you build is Python, and Python is awesome.

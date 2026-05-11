@@ -3,7 +3,7 @@
 For each task in humaneval_subset.jsonl:
   1. Spin up a fresh workspace under benchmark/_runs/<task_id>.
   2. Write a prompt.md asking Ralph to complete the function in solution.py.
-  3. Run ralph.py as a subprocess against that workspace.
+  3. Run `python -m ralph` as a subprocess against that workspace.
   4. After Ralph marks done (or hits MAX_ITERATIONS), import solution.py and
      run the canonical HumanEval `check(candidate)` against it.
   5. Report pass/fail + elapsed time.
@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
-RALPH_PY = HERE.parent / "ralph.py"
 TASKS_FILE = HERE / "humaneval_subset.jsonl"
 RUNS_DIR = HERE / "_runs"
 
@@ -60,7 +59,7 @@ def slug(task_id: str) -> str:
 
 
 def run_ralph(workspace: Path, prompt: Path, model: str | None) -> tuple[int, float]:
-    cmd = [sys.executable, str(RALPH_PY),
+    cmd = [sys.executable, "-m", "ralph",
            "--workspace", str(workspace),
            "--prompt", str(prompt),
            "--bus-dir", str(workspace / "_bus")]

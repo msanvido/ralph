@@ -8,3 +8,6 @@ bus/
 logs/
 benchmark/_runs/
 .claude/
+*.egg-info/
+build/
+dist/

@@ -6,7 +6,7 @@ import time
 import traceback
 from pathlib import Path
 
-import config
+from . import config
 
 TOOLS_LRU_LIMIT = 100  # max number of dynamic tool files retained in workspace/tools/
 

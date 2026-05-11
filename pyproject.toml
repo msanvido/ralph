@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ralph"
+version = "0.1.0"
+description = "Ralph: a Python coding agent that re-feeds the same prompt until the task is done."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.50",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+ralph = "ralph.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ralph*"]

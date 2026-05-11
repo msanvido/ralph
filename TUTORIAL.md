@@ -49,7 +49,7 @@ That's it. Everything below is mechanism in service of this idea.
 The whole concept is in `ralph.run_iteration` and `ralph.iterate_until_done`:
 
 ```python
-# ralph.py — simplified outline
+# ralph/cli.py — simplified outline
 def iterate_until_done():
     for i in range(1, MAX_ITERATIONS + 1):
         prompt = PROMPT_FILE.read_text()    # re-read every iteration
@@ -76,7 +76,7 @@ def run_iteration(prompt, n):
 A standard tool-use loop. The crucial thing is what's *not* there: nothing carries
 state into iteration N+1 except the filesystem.
 
-See [`ralph.py`](./ralph.py) for the full implementation with multi-provider
+See [`ralph/cli.py`](./ralph/cli.py) for the full implementation with multi-provider
 support via [LiteLLM](https://docs.litellm.ai), pretty-printing, and a few extras.
 
 ---
@@ -269,10 +269,10 @@ The model is called through [LiteLLM](https://docs.litellm.ai), which accepts
 the OpenAI-format messages/tools and translates per provider:
 
 ```sh
-python ralph.py --model openrouter/deepseek/deepseek-chat-v3.1   # default
-python ralph.py --model anthropic/claude-sonnet-4-6
-python ralph.py --model openai/gpt-4o
-python ralph.py --model gemini/gemini-2.0-flash
+ralph --model openrouter/deepseek/deepseek-chat-v3.1   # default
+ralph --model anthropic/claude-sonnet-4-6
+ralph --model openai/gpt-4o
+ralph --model gemini/gemini-2.0-flash
 ```
 
 API keys come from `.env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
@@ -287,12 +287,12 @@ shape on load.
 ## 9. Try it
 
 ```sh
-pip install -r requirements.txt
+pip install -e .
 echo "OPENROUTER_API_KEY=..." > .env
 
 # A simple task
 echo "Write Conway's Game of Life in life.py with tests in test_life.py. Make tests pass, then mark_done." > prompt.md
-python ralph.py
+ralph
 ```
 
 Watch the workspace fill up:
@@ -312,7 +312,7 @@ Benchmark on a HumanEval subset:
 
 ```sh
 python benchmark/run.py            # all tasks
-python benchmark/run.py --task humaneval_0   # single task
+python benchmark/run.py --task HumanEval/0   # single task
 ```
 
 ---
@@ -338,9 +338,9 @@ the point.
 
 In rough order of importance:
 
-- [`ralph.py`](./ralph.py) — the loop, the system prompt, the entry point
-- [`tools.py`](./tools.py) — file tools, dynamic loader, dispatch
-- [`memory.py`](./memory.py) — lesson storage, select/learn passes
-- [`bus.py`](./bus.py) — FIFO listener, auto-fulfillment, status files
-- [`config.py`](./config.py) — paths, model, LiteLLM entry point
+- [`ralph/cli.py`](./ralph/cli.py) — the loop, the system prompt, the entry point
+- [`ralph/tools.py`](./ralph/tools.py) — file tools, dynamic loader, dispatch
+- [`ralph/memory.py`](./ralph/memory.py) — lesson storage, select/learn passes
+- [`ralph/bus.py`](./ralph/bus.py) — FIFO listener, auto-fulfillment, status files
+- [`ralph/config.py`](./ralph/config.py) — paths, model, LiteLLM entry point
 - [`test_ralph.py`](./test_ralph.py) — 69 tests covering each layer

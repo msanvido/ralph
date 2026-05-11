@@ -1,2 +1,0 @@
-litellm>=1.50
-python-dotenv>=1.0
