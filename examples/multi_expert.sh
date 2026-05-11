@@ -20,63 +20,28 @@ rm -rf "$BUS"
 mkdir -p ws_fib ws_prime ws_classifier ws_watcher_multi logs
 
 [ -f ws_fib/prompt.md ] || cat > ws_fib/prompt.md <<'EOF'
-You are a Fibonacci-numbers specialist. Build a reusable tool other Ralphs can fetch.
+For each number in this list, decide whether it is a Fibonacci number.
+Save your answers to solution.txt as one line per number: "<n>: yes" or "<n>: no".
 
-1. Write tools/is_fibonacci.py with:
-   TOOL = {
-     "name": "is_fibonacci",
-     "description": "Check whether a non-negative integer is a Fibonacci number",
-     "input_schema": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
-   }
-   def run(n): -> {"is_fibonacci": bool}
-   Use the perfect-square test: n is Fibonacci iff (5n^2 + 4) or (5n^2 - 4) is a perfect square.
-   Handle n=0 and n=1 explicitly.
-2. Capture at least one recipe — procedural/heuristic knowledge that wouldn't fit cleanly
-   in the tool itself (e.g., the perfect-square trick, when O(n) enumeration is fine vs not).
-3. mark_done after the tool exists and you have at least one recipe captured.
+Numbers: 13, 21, 32, 55, 64, 89, 100, 144
 EOF
 
 [ -f ws_prime/prompt.md ] || cat > ws_prime/prompt.md <<'EOF'
-You are a prime-numbers specialist. Build a reusable tool other Ralphs can fetch.
+For each number in this list, decide whether it is prime.
+Save your answers to solution.txt as one line per number: "<n>: yes" or "<n>: no".
 
-1. Write tools/is_prime.py with:
-   TOOL = {
-     "name": "is_prime",
-     "description": "Check whether a non-negative integer is prime",
-     "input_schema": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
-   }
-   def run(n): -> {"is_prime": bool}
-   Use trial division up to floor(sqrt(n)); handle 0, 1, and 2 correctly.
-2. Capture at least one recipe — procedural notes worth telling a future Ralph (edge cases
-   like 0/1/2, when trial division is fine vs. when you'd want Miller-Rabin, etc.).
-3. mark_done after the tool exists and you have at least one recipe captured.
+Numbers: 7, 8, 13, 19, 23, 25, 51, 89, 97
 EOF
 
 [ -f ws_classifier/prompt.md ] || cat > ws_classifier/prompt.md <<'EOF'
 Classify the number 89: is it a Fibonacci number, a prime, both, or neither?
-Write the answer to solution.txt as a single line: "89: <fibonacci|prime|both|neither>".
-
-Don't reinvent — there are specialists on the bus. Workflow:
-
-1. Read the "## Peers on the bus" section at the top of your prompt. Identify the
-   Fibonacci specialist and the prime specialist by their `expertise:` lines.
-2. ask_ralph(id=<fib_ralph_id>, category="tools",
-             description="check if a number is a Fibonacci") — save the request_id.
-3. ask_ralph(id=<prime_ralph_id>, category="tools",
-             description="check if a number is prime") — save the request_id.
-4. On later turns, check_response for both. The answer carries {files: {<name>.py: source}}.
-   Save each tool to your own tools/<name>.py via write — the loop reloads tools
-   automatically.
-5. Call is_fibonacci(n=89) and is_prime(n=89) as ordinary tools. Combine the booleans
-   into the answer ("both", "fibonacci", "prime", or "neither") and write it to
-   solution.txt.
-6. mark_done.
+Save the answer to solution.txt as a single line: "89: <fibonacci|prime|both|neither>".
 EOF
 
 [ -f ws_watcher_multi/prompt.md ] || cat > ws_watcher_multi/prompt.md <<'EOF'
-Every iteration: call list_ralphs(), then peek_ralph(id) for each ralph other than yourself.
-Maintain workspace/dashboard.md with one bullet per ralph: id, expertise, iteration, done,
-last_text. mark_done when every other ralph reports done=true.
+Track the progress of every other ralph on the bus. Maintain workspace/dashboard.md
+with one line per ralph: id, expertise, iteration, done, last status.
+mark_done when every other ralph reports done=true.
 EOF
 
 cleanup() {

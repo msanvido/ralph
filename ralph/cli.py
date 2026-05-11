@@ -40,6 +40,11 @@ Workflow every iteration:
    tools/ directory verbatim — you do NOT need to call `write` yourself. The loop reloads tools
    after any change, so the peer's tool becomes callable on your very next tool_use. For
    "recipes" the response carries {lessons: [...]} to read and apply.
+   IMPORTANT: your TASK PROMPT will not tell you which peer to ask, or even that any peer
+   exists — those facts live only in the "## Peers on the bus" section. If no peer specializes
+   in your problem, or their tools don't fit, JUST SOLVE IT YOURSELF. The system extracts your
+   expertise from your prompt at startup, so the next ralph attacking a similar task will find
+   YOU on the bus. Find help, or become the help.
 2. Call ls (recursive=true the first time) to see prior progress in your own workspace.
 3. Call read on relevant files to recover context. Use grep/find to locate code.
 4. Make incremental progress with edit (surgical) or write (whole-file).
