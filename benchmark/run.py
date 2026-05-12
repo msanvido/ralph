@@ -58,7 +58,7 @@ def slug(task_id: str) -> str:
     return task_id.replace("/", "_").lower()
 
 
-def run_ralph(workspace: Path, prompt: Path, model: str | None) -> tuple[int, float]:
+def run_ralph(workspace: Path, prompt: Path, model: str | None) -> tuple[int, float, str]:
     cmd = [sys.executable, "-m", "ralph",
            "--workspace", str(workspace),
            "--prompt", str(prompt),
@@ -67,7 +67,30 @@ def run_ralph(workspace: Path, prompt: Path, model: str | None) -> tuple[int, fl
         cmd += ["--model", model]
     started = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    return proc.returncode, time.time() - started
+    # Combine the tail of stdout+stderr so callers can surface real errors
+    # (e.g., a model-validation exit or a startup ImportError) instead of
+    # the misleading "solution.py not found" verifier message.
+    tail = (proc.stdout + proc.stderr).strip()[-1500:]
+    return proc.returncode, time.time() - started, tail
+
+
+def preflight() -> None:
+    """Fail fast if `<sys.executable> -m ralph --help` doesn't even start. Otherwise
+    every task would spin up a workspace just to die on import with the failure
+    hidden inside captured stderr."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "ralph", "--help"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if proc.returncode != 0:
+        msg = (proc.stderr + proc.stdout).strip()[-1000:]
+        sys.exit(
+            f"`{sys.executable} -m ralph --help` failed (rc={proc.returncode}).\n"
+            f"Most likely the Python you're running with doesn't have ralph installed.\n"
+            f"Try: .venv/bin/python benchmark/run.py {' '.join(sys.argv[1:])}\n"
+            f"(or activate the venv first.)\n\n"
+            f"Subprocess output:\n{msg}"
+        )
 
 
 def verify(workspace: Path, entry_point: str) -> tuple[bool, str]:
@@ -99,10 +122,19 @@ def run_task(task: dict, model: str | None) -> dict:
     # Run Ralph. Daemonize the bus so it doesn't pollute the parent dir.
     print(f"  ▶ running ralph...", flush=True)
     try:
-        rc, elapsed = run_ralph(ws, prompt_path, model)
+        rc, elapsed, tail = run_ralph(ws, prompt_path, model)
     except subprocess.TimeoutExpired:
         return {"task": task["task_id"], "passed": False, "elapsed": 600.0,
                 "reason": "ralph timed out (600s)"}
+
+    # If Ralph exited non-zero, surface its actual output. Don't bother running the
+    # verifier — its "solution.py not found" message would just hide the real cause.
+    if rc != 0:
+        return {
+            "task": task["task_id"], "passed": False, "elapsed": elapsed,
+            "reason": f"ralph exited rc={rc}; tail of output:\n{tail}",
+            "ralph_rc": rc,
+        }
 
     # Verify against the bundled HumanEval test.
     passed, reason = verify(ws, task["entry_point"])
@@ -117,6 +149,8 @@ def main():
     p.add_argument("--model", type=str, default=None, help="LiteLLM model string")
     p.add_argument("--task", type=str, default=None, help="Run only this task id (e.g. HumanEval/0)")
     args = p.parse_args()
+
+    preflight()
 
     tasks = load_tasks()
     if args.task:
@@ -140,7 +174,10 @@ def main():
     print(f"{'=' * 50}")
     for r in results:
         symbol = "✅" if r["passed"] else "❌"
-        print(f"  {symbol} {r['task']:<20} {r['elapsed']:>6.1f}s  {r['reason'][:60]}")
+        # Show only the first line of the reason in the summary (full tail
+        # already printed per-task above).
+        first_line = r["reason"].splitlines()[0] if r["reason"] else ""
+        print(f"  {symbol} {r['task']:<20} {r['elapsed']:>6.1f}s  {first_line[:60]}")
 
 
 if __name__ == "__main__":
