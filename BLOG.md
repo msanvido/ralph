@@ -54,75 +54,34 @@ Three loops, nested:
 
 ## Pictured
 
-**Single Ralph.** Each iteration's LLM context is discarded at the end of the
-turn. The only thing that crosses the iteration boundary is what's on disk —
-the workspace is the agent's memory of record.
+A few Ralphs sharing a bus. Each Ralph is a Python process paired with its
+own workspace directory; the bus is a shared directory of status files and
+named pipes that all the Ralphs read and write. No server, no broker — just
+a Python loop next to a `ws_*/` folder, repeated.
 
 ```mermaid
 flowchart TB
-    subgraph N["iteration N — fresh context, discarded at end"]
+    subgraph A["Ralph A"]
       direction LR
-      bN["read peers + recipes + task"] --> lN["LLM ↔ tool-use loop"] --> kN["learn pass<br/>(distill recipes)"]
+      pA["python<br/>iterate loop"] --- fA[("ws_a/<br/>tools · recipes · artifacts")]
     end
 
-    fs[("workspace/<br/>tools/&lt;name&gt;.py<br/>memory/recipes/&lt;slug&gt;.py<br/>artifacts<br/>DONE")]
-
-    subgraph N1["iteration N+1 — fresh context, discarded at end"]
+    subgraph B["Ralph B"]
       direction LR
-      bN1["read peers + recipes + task"] --> lN1["LLM ↔ tool-use loop"] --> kN1["learn pass<br/>(distill recipes)"]
+      pB["python<br/>iterate loop"] --- fB[("ws_b/<br/>tools · recipes · artifacts")]
     end
 
-    fs -- "seeds prompt" --> bN
-    lN -- "read / write / edit / grep" --> fs
-    fs -- "ls / load tools" --> lN
-    kN -- "persist recipes" --> fs
-    fs -- "seeds prompt" --> bN1
-    lN1 -- "read / write / edit / grep" --> fs
-    fs -- "ls / load tools" --> lN1
-    kN1 -- "persist recipes" --> fs
+    subgraph C["Ralph C"]
+      direction LR
+      pC["python<br/>iterate loop"] --- fC[("ws_c/<br/>tools · recipes · artifacts")]
+    end
+
+    bus[("bus/<br/>shared directory")]
+
+    pA --- bus
+    pB --- bus
+    pC --- bus
 ```
-
-**Multi-Ralph cooperation.** Multiple Ralphs share a `bus/` directory. Each
-publishes a status file every iteration; a daemon listener thread on each
-Ralph reads its own FIFO and auto-fulfills incoming asks from its own
-filesystem — no LLM round-trip on the responder side.
-
-```mermaid
-flowchart LR
-    subgraph rA["Ralph A"]
-      direction TB
-      mA["main thread<br/>(iterate)"]
-      lA["listener thread<br/>(auto-fulfill)"]
-      wsA[("ws_a/")]
-      mA <--> wsA
-      lA --> wsA
-    end
-
-    bus[("bus/<br/>A.status &middot; B.status<br/>A.fifo &middot; B.fifo<br/>req/&middot;json &middot; resp/&middot;json")]
-
-    subgraph rB["Ralph B"]
-      direction TB
-      mB["main thread<br/>(iterate)"]
-      lB["listener thread<br/>(auto-fulfill)"]
-      wsB[("ws_b/")]
-      mB <--> wsB
-      lB --> wsB
-    end
-
-    mA -- "publish status" --> bus
-    mB -- "publish status" --> bus
-    bus -- "peek peers" --> mA
-    bus -- "peek peers" --> mB
-
-    mA -- "ask_ralph(B, ...)" --> bus
-    bus -- "fifo wakeup" --> lB
-    lB -- "write resp/&lt;rid&gt;.json" --> bus
-    bus -- "check_response" --> mA
-```
-
-The bus has no server. Everything is files and named pipes; the only
-in-process state is each Ralph's own listener thread, which crashes
-independently.
 
 ---
 
