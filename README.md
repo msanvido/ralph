@@ -136,15 +136,29 @@ the bus` section. The system prompt's first step is "route asks by expertise —
 specializes in what you need, fetch from them via `ask_ralph(id, category, description)`
 before writing your own." Reuse beats reinvention.
 
-Memory layout (one file per recipe, mirroring the per-tool pattern):
+Memory layout (a single JSON file — the whole memory state is one data structure):
 
 ```
 workspace/memory/
-└── recipes/
-    ├── _index.py                  # INDEX = [{id, description}, ...]
-    ├── always_ls_before_read.py   # MEMORY = {description, prompt}
-    └── ...
+└── memory.json
 ```
+
+```jsonc
+{
+  "recipes": {
+    "always_ls_before_read": {
+      "description": "short — used for selection",
+      "prompt":      "full recipe — loaded into context when selected",
+      "ts":          1716495200.0
+    }
+    // ...
+  }
+}
+```
+
+Categories are top-level keys; each lesson is keyed by a slug derived from its
+description. The learn phase reads + mutates this one file, so adding or updating
+lessons is a single load → mutate → save.
 
 Recipes are procedural/heuristic knowledge — strategies, decision heuristics, judgment
 calls — for problems that don't reduce cleanly to a Python tool. Anything algorithmic
@@ -152,8 +166,9 @@ belongs in `workspace/tools/` as code, not here as text.
 
 `description` is short — used for relevance selection (locally and when ranking against
 a peer's `ask_ralph` request). `prompt` is the full recipe — loaded into context only
-when selected. `ask_ralph(id, "recipes", description)` returns the top 3
-`{id, description, prompt}` triples by keyword overlap with the requester's description.
+when selected. `ts` is the LRU timestamp, touched on add and on select.
+`ask_ralph(id, "recipes", description)` returns the top 3 `{id, description, prompt}`
+triples by keyword overlap with the requester's description.
 
 ## Bus directory layout
 
@@ -188,12 +203,14 @@ Both stores are capped to keep context and the workspace bounded:
 
 - **Tools** in `workspace/tools/*.py` — capped at 100. Touched on each call. When over the
   cap, the least-recently-used tool files are deleted on the next reload.
-- **Memory** lessons across `workspace/memory/*/*.py` — capped at 100 total. Touched when
-  added and when selected into the iteration prompt. Oldest lessons are deleted on add.
+- **Memory** lessons across all categories in `workspace/memory/memory.json` — capped at
+  100 total. Touched when added and when selected into the iteration prompt. Oldest
+  lessons are deleted on add.
 
-Last-used timestamps live in `workspace/tools/_lru.py` and `workspace/memory/_lru.py`.
-Caps are module-level (`tools.TOOLS_LRU_LIMIT`, `memory.MEMORY_LRU_LIMIT`) — edit if you
-want a different ceiling.
+Tool last-used timestamps live in `workspace/tools/_lru.py`; memory timestamps live
+inline on each entry in `memory.json` (the `ts` field). Caps are module-level
+(`tools.TOOLS_LRU_LIMIT`, `memory.MEMORY_LRU_LIMIT`) — edit if you want a different
+ceiling.
 
 ## CLI flags
 

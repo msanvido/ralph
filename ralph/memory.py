@@ -4,22 +4,29 @@ Recipes are procedural/heuristic knowledge for problems that don't reduce cleanl
 Python tool — multi-step strategies, when-to-use-which-approach, hard-won judgment calls.
 Anything algorithmic should be codified as a TOOL in workspace/tools/ instead.
 
-Storage layout (mirrors workspace/tools/ — one file per item):
+Storage: a single JSON file at workspace/memory/memory.json, shaped like
 
-  workspace/memory/
-    recipes/
-      _index.py          INDEX = [{"id": "...", "description": "..."}, ...]
-      <slug>.py          MEMORY = {"description": "...", "prompt": "..."}
+    {
+      "recipes": {
+        "<lesson_id>": {
+          "description": "short — used for selection",
+          "prompt":      "full recipe — loaded into context when selected",
+          "ts":          1716495200.0
+        },
+        ...
+      }
+    }
 
-`description` is short — used for selection / discovery.
-`prompt` is the full recipe — loaded into context only when selected.
+Categories are top-level keys. `ts` is the LRU timestamp (touched on add and on select);
+when the total lesson count exceeds MEMORY_LRU_LIMIT, the oldest lessons are evicted on add.
 """
 import json
 import re
+import time
 from pathlib import Path
 
 from . import config
-from .tools import LRUStore, load_py_module, to_openai_tool, write_py_literal
+from .tools import to_openai_tool
 
 # Single-element tuple kept for forward compatibility with code that iterates categories
 # (load_index, fulfill_peer_request, etc.). If we ever want a finer split again, this is
@@ -28,131 +35,105 @@ MEMORY_CATEGORIES = ("recipes",)
 MEMORY_LRU_LIMIT = 100  # max total lessons across all categories
 
 
-# === Slug + file helpers ===
+# === Store: single JSON file holding all memory ===
+
+def _store_path() -> Path:
+    return config.MEMORY_DIR / "memory.json"
+
+
+def _empty_store() -> dict:
+    return {cat: {} for cat in MEMORY_CATEGORIES}
+
+
+def load_store() -> dict:
+    """Read the entire memory store. Always returns a dict with every category key present."""
+    path = _store_path()
+    if not path.exists():
+        return _empty_store()
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return _empty_store()
+    store = _empty_store()
+    if isinstance(data, dict):
+        for cat in MEMORY_CATEGORIES:
+            bucket = data.get(cat)
+            if isinstance(bucket, dict):
+                store[cat] = {k: v for k, v in bucket.items() if isinstance(v, dict)}
+    return store
+
+
+def save_store(store: dict) -> None:
+    path = _store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2, sort_keys=True))
+
 
 def _slugify(text: str, max_len: int = 40) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return (s[:max_len] or "lesson").rstrip("_")
 
 
-def _lesson_source(description: str, prompt: str) -> str:
-    return (
-        "MEMORY = {\n"
-        f"    \"description\": {json.dumps(description)},\n"
-        f"    \"prompt\": {json.dumps(prompt)},\n"
-        "}\n"
-    )
-
-
-def _write_index(path: Path, index: list[dict]) -> None:
-    write_py_literal(path, "INDEX", index)
-
+# === Public read API ===
 
 def load_index(category: str) -> list[dict]:
-    """Read the per-category index. Returns [{"id", "description"}, ...] or []."""
-    path = config.MEMORY_DIR / category / "_index.py"
-    if not path.exists():
-        return []
-    module = load_py_module(f"_ralph_index_{category}", path)
-    if module is None:
-        return []
-    index = getattr(module, "INDEX", None)
-    return index if isinstance(index, list) else []
+    """Return [{"id", "description"}, ...] for a category, or []."""
+    bucket = load_store().get(category) or {}
+    return [{"id": lid, "description": entry.get("description", "")}
+            for lid, entry in bucket.items()]
 
 
 def load_lesson(category: str, lesson_id: str) -> dict | None:
-    """Read a single lesson file. Returns {"description", "prompt"} or None."""
-    path = config.MEMORY_DIR / category / f"{lesson_id}.py"
-    if not path.exists():
+    """Return {"description", "prompt"} for one lesson, or None."""
+    entry = (load_store().get(category) or {}).get(lesson_id)
+    if not isinstance(entry, dict):
         return None
-    module = load_py_module(f"_ralph_memory_{category}_{lesson_id}", path)
-    if module is None:
-        return None
-    mem = getattr(module, "MEMORY", None)
-    if not isinstance(mem, dict):
-        return None
-    return mem
+    return {
+        "description": entry.get("description", ""),
+        "prompt": entry.get("prompt", ""),
+    }
 
+
+def read_memory_items() -> list[tuple[str, str, str]]:
+    """Return (catalog_id, category, description) for every lesson across all categories.
+    catalog_id is "<category>:<slug>" — stable, descriptive."""
+    items: list[tuple[str, str, str]] = []
+    store = load_store()
+    for cat in MEMORY_CATEGORIES:
+        for lid, entry in (store.get(cat) or {}).items():
+            description = entry.get("description")
+            if description:
+                items.append((f"{cat}:{lid}", cat, description))
+    return items
+
+
+# === Public write API ===
 
 def add_lesson(category: str, description: str, prompt: str) -> str | None:
-    """Write a new lesson file and update the category index. Returns the slug, or None.
-    Also bumps the lesson's LRU timestamp and evicts oldest lessons if over the cap."""
+    """Append a lesson to the store. Returns the new lesson id, or None on invalid input.
+    Stamps the lesson's LRU timestamp and evicts oldest lessons if over the cap."""
     if category not in MEMORY_CATEGORIES:
         return None
     description = description.strip()
     prompt = prompt.strip()
     if not description or not prompt:
         return None
-    cat_dir = config.MEMORY_DIR / category
-    cat_dir.mkdir(parents=True, exist_ok=True)
-
+    store = load_store()
+    bucket = store.setdefault(category, {})
     base = _slugify(description)
     lesson_id = base
     n = 2
-    while (cat_dir / f"{lesson_id}.py").exists():
+    while lesson_id in bucket:
         lesson_id = f"{base}_{n}"
         n += 1
-
-    (cat_dir / f"{lesson_id}.py").write_text(_lesson_source(description, prompt))
-
-    index = load_index(category)
-    index.append({"id": lesson_id, "description": description})
-    _write_index(cat_dir / "_index.py", index)
-
-    _touch_memory(f"{category}:{lesson_id}")
-    _evict_memory_if_needed()
+    bucket[lesson_id] = {
+        "description": description,
+        "prompt": prompt,
+        "ts": time.time(),
+    }
+    _evict_if_needed(store)
+    save_store(store)
     return lesson_id
-
-
-# === LRU eviction (cap total lessons at MEMORY_LRU_LIMIT) ===
-
-_MEMORY_LRU = LRUStore(lambda: config.MEMORY_DIR / "_lru.py")
-
-
-def _touch_memory(catalog_id: str) -> None:
-    _MEMORY_LRU.touch(catalog_id)
-
-
-def _delete_lesson(catalog_id: str) -> None:
-    cat, lesson_id = catalog_id.split(":", 1)
-    cat_dir = config.MEMORY_DIR / cat
-    (cat_dir / f"{lesson_id}.py").unlink(missing_ok=True)
-    index = [e for e in load_index(cat) if e.get("id") != lesson_id]
-    _write_index(cat_dir / "_index.py", index)
-
-
-def _evict_memory_if_needed() -> list[str]:
-    """If total lesson count > MEMORY_LRU_LIMIT, evict oldest. Returns evicted catalog_ids."""
-    items = read_memory_items()
-    if len(items) <= MEMORY_LRU_LIMIT:
-        return []
-    lru = _MEMORY_LRU.load()
-    pairs = sorted(((cid, lru.get(cid, 0.0)) for cid, _, _ in items), key=lambda x: x[1])
-    excess = len(items) - MEMORY_LRU_LIMIT
-    evicted: list[str] = []
-    for cid, _ts in pairs[:excess]:
-        _delete_lesson(cid)
-        lru.pop(cid, None)
-        evicted.append(cid)
-    if evicted:
-        _MEMORY_LRU.save(lru)
-        print(f"  🗑️  evicted {len(evicted)} memory lesson(s) (LRU)")
-    return evicted
-
-
-# === Catalog (used by select_relevant_memories) ===
-
-def read_memory_items() -> list[tuple[str, str, str]]:
-    """Return (catalog_id, category, description) for every lesson across all categories.
-    catalog_id is "<category>:<slug>" — stable, descriptive."""
-    items: list[tuple[str, str, str]] = []
-    for cat in MEMORY_CATEGORIES:
-        for entry in load_index(cat):
-            lesson_id = entry.get("id")
-            description = entry.get("description")
-            if lesson_id and description:
-                items.append((f"{cat}:{lesson_id}", cat, description))
-    return items
 
 
 def append_memory(learnings: dict) -> int:
@@ -165,6 +146,26 @@ def append_memory(learnings: dict) -> int:
             if add_lesson(cat, entry.get("description", ""), entry.get("prompt", "")):
                 total += 1
     return total
+
+
+# === LRU eviction (cap total lessons at MEMORY_LRU_LIMIT) ===
+
+def _evict_if_needed(store: dict) -> list[str]:
+    """If total lesson count > MEMORY_LRU_LIMIT, drop the oldest in place. Returns catalog_ids."""
+    flat = [(cat, lid, entry.get("ts", 0.0))
+            for cat in MEMORY_CATEGORIES
+            for lid, entry in (store.get(cat) or {}).items()]
+    if len(flat) <= MEMORY_LRU_LIMIT:
+        return []
+    flat.sort(key=lambda x: x[2])
+    excess = len(flat) - MEMORY_LRU_LIMIT
+    evicted: list[str] = []
+    for cat, lid, _ts in flat[:excess]:
+        store[cat].pop(lid, None)
+        evicted.append(f"{cat}:{lid}")
+    if evicted:
+        print(f"  🗑️  evicted {len(evicted)} memory lesson(s) (LRU)")
+    return evicted
 
 
 # === Transcript formatting ===
@@ -279,7 +280,13 @@ SELECT_TOOL = to_openai_tool({
 
 
 def select_relevant_memories(prompt: str) -> str:
-    items = read_memory_items()
+    store = load_store()
+    items: list[tuple[str, str, str]] = []
+    for cat in MEMORY_CATEGORIES:
+        for lid, entry in (store.get(cat) or {}).items():
+            description = entry.get("description")
+            if description:
+                items.append((f"{cat}:{lid}", cat, description))
     if not items:
         return ""
     catalog = "\n".join(f"[{cid}] ({cat}) {desc}" for cid, cat, desc in items)
@@ -295,14 +302,21 @@ def select_relevant_memories(prompt: str) -> str:
     if not selected:
         return ""
     recipes: list[str] = []
-    for cid, cat, _desc in items:
-        if cid not in selected:
+    touched = False
+    now = time.time()
+    for cid in selected:
+        if ":" not in cid:
             continue
-        _, lesson_id = cid.split(":", 1)
-        lesson = load_lesson(cat, lesson_id)
-        if lesson and lesson.get("prompt"):
-            _touch_memory(cid)
-            recipes.append(f"- {lesson['prompt']}")
+        cat, lid = cid.split(":", 1)
+        if cat not in MEMORY_CATEGORIES:
+            continue
+        entry = (store.get(cat) or {}).get(lid)
+        if entry and entry.get("prompt"):
+            entry["ts"] = now
+            touched = True
+            recipes.append(f"- {entry['prompt']}")
+    if touched:
+        save_store(store)
     if not recipes:
         return ""
     print(f"  📚 recalled {len(recipes)} relevant recipe(s)")

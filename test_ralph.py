@@ -306,23 +306,28 @@ class MemoryTests(unittest.TestCase):
         """Build a {description, prompt} lesson dict."""
         return {"description": description, "prompt": prompt or f"FULL: {description}"}
 
-    def test_append_memory_writes_lesson_files_and_index(self):
+    def test_append_memory_writes_lessons_to_store(self):
         count = memory.append_memory({
             "recipes": [self._l("call ls before reading"), self._l("use edit for surgical changes")],
         })
         self.assertEqual(count, 2)
-        recipes_dir = self.mem / "recipes"
-        self.assertTrue((recipes_dir / "_index.py").exists())
-        self.assertTrue((recipes_dir / "call_ls_before_reading.py").exists())
-        self.assertTrue((recipes_dir / "use_edit_for_surgical_changes.py").exists())
-        # No other category directories should be created.
-        self.assertFalse((self.mem / "worked").exists())
-        self.assertFalse((self.mem / "failed").exists())
-        # Lesson file holds both fields.
+        store_path = self.mem / "memory.json"
+        self.assertTrue(store_path.exists())
+        # The entire memory state lives in one JSON file — no per-lesson .py files.
+        store = json.loads(store_path.read_text())
+        self.assertEqual(
+            sorted(store["recipes"].keys()),
+            ["call_ls_before_reading", "use_edit_for_surgical_changes"],
+        )
+        # Stored entries carry description + prompt + ts.
+        entry = store["recipes"]["call_ls_before_reading"]
+        self.assertEqual(entry["description"], "call ls before reading")
+        self.assertEqual(entry["prompt"], "FULL: call ls before reading")
+        self.assertIn("ts", entry)
+        # Public read API surfaces the same data.
         lesson = memory.load_lesson("recipes", "call_ls_before_reading")
         self.assertEqual(lesson["description"], "call ls before reading")
         self.assertEqual(lesson["prompt"], "FULL: call ls before reading")
-        # Index lists the lesson.
         index = memory.load_index("recipes")
         self.assertEqual(
             sorted(e["id"] for e in index),
@@ -346,10 +351,11 @@ class MemoryTests(unittest.TestCase):
         # Two descriptions slugify to the same id — second should get a _2 suffix.
         memory.append_memory({"recipes": [self._l("Use ls!")]})
         memory.append_memory({"recipes": [self._l("use ls?")]})
-        ids = [e["id"] for e in memory.load_index("recipes")]
+        ids = sorted(e["id"] for e in memory.load_index("recipes"))
         self.assertEqual(ids, ["use_ls", "use_ls_2"])
-        self.assertTrue((self.mem / "recipes" / "use_ls.py").exists())
-        self.assertTrue((self.mem / "recipes" / "use_ls_2.py").exists())
+        store = json.loads((self.mem / "memory.json").read_text())
+        self.assertIn("use_ls", store["recipes"])
+        self.assertIn("use_ls_2", store["recipes"])
 
     def test_append_memory_ignores_unknown_categories(self):
         # 'worked' and 'failed' are no longer categories — they get silently dropped.
@@ -360,8 +366,8 @@ class MemoryTests(unittest.TestCase):
         })
         self.assertEqual(count, 1)
         self.assertEqual([e["id"] for e in memory.load_index("recipes")], ["kept"])
-        self.assertFalse((self.mem / "worked").exists())
-        self.assertFalse((self.mem / "failed").exists())
+        store = json.loads((self.mem / "memory.json").read_text())
+        self.assertEqual(set(store.keys()), {"recipes"})
 
     def test_format_transcript_handles_openai_messages(self):
         messages = [
@@ -477,9 +483,9 @@ class MemoryTests(unittest.TestCase):
         use_edit = memory.load_lesson("recipes", "use_edit")
         self.assertEqual(use_edit["description"], "use edit")
         self.assertIn("Use edit for surgical", use_edit["prompt"])
-        # Old worked/failed dirs are never created.
-        self.assertFalse((self.mem / "worked").exists())
-        self.assertFalse((self.mem / "failed").exists())
+        # Only the 'recipes' bucket exists in the store.
+        store = json.loads((self.mem / "memory.json").read_text())
+        self.assertEqual(set(store.keys()), {"recipes"})
 
 
 class ToolsLRUTests(unittest.TestCase):
@@ -574,9 +580,15 @@ class MemoryLRUTests(unittest.TestCase):
         return {"description": desc, "prompt": f"FULL: {desc}"}
 
     def _stamp(self, catalog_id: str, ts: float) -> None:
-        lru = memory._MEMORY_LRU.load()
-        lru[catalog_id] = ts
-        memory._MEMORY_LRU.save(lru)
+        """Backdate a lesson's LRU timestamp by mutating the store directly."""
+        cat, lid = catalog_id.split(":", 1)
+        store = memory.load_store()
+        store[cat][lid]["ts"] = ts
+        memory.save_store(store)
+
+    def _ts(self, catalog_id: str) -> float:
+        cat, lid = catalog_id.split(":", 1)
+        return memory.load_store()[cat][lid]["ts"]
 
     def test_add_evicts_oldest_when_over_limit(self):
         # Seed 3 recipes under the cap, manually backdate them.
@@ -588,7 +600,8 @@ class MemoryLRUTests(unittest.TestCase):
         memory.append_memory({"recipes": [self._l("fourth")]})
         ids = sorted(e["id"] for e in memory.load_index("recipes"))
         self.assertEqual(ids, ["fourth", "second", "third"])
-        self.assertFalse((self.mem / "recipes" / "first.py").exists())
+        store = json.loads((self.mem / "memory.json").read_text())
+        self.assertNotIn("first", store["recipes"])
 
     def test_select_bumps_lru_timestamp_for_selected_recipes(self):
         memory.append_memory({"recipes": [self._l("ls first")]})
@@ -599,8 +612,7 @@ class MemoryLRUTests(unittest.TestCase):
         )
         with patch.object(config, "completion", return_value=response):
             memory.select_relevant_memories("a task")
-        lru = memory._MEMORY_LRU.load()
-        self.assertGreater(lru["recipes:ls_first"], 100.0)
+        self.assertGreater(self._ts("recipes:ls_first"), 100.0)
 
     def test_no_eviction_when_under_limit(self):
         memory.append_memory({"recipes": [self._l("only one")]})
