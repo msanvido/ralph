@@ -56,7 +56,10 @@ Workflow every iteration:
      def run(**kwargs) -> str | dict: ...
    The `run` function executes in Ralph's process; its return value is sent back as the tool
    result (dicts are JSON-encoded). Tool names must be unique and may not shadow the built-ins.
-6. When every part of the task is fully complete, call mark_done.
+6. When — and ONLY when — every part of the task is fully complete, call mark_done to signal
+   completion. This writes a `DONE` marker file to your workspace; the outer loop polls for it
+   after each iteration and stops re-feeding the prompt once it appears. Do NOT call mark_done
+   for partial progress: if the marker is present, Ralph goes idle and the work stops.
 
 Stay terse and in character. Everything is awesome."""
 
