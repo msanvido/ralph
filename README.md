@@ -69,11 +69,20 @@ A few ready-to-run demos live in `examples/`:
 - `examples/multi_expert.sh` — four Ralphs where the novice must route asks to the
   right specialist based on each peer's published `expertise`. Showcases
   `ask_ralph(id, category, description)` and the top-3 description-match ranking.
+- `examples/parallel_r_count.sh` — four Ralphs: three list specialists (fruits,
+  animals, US states) each expose a `list_*` tool; an aggregator fetches all
+  three via `ask_ralph`, calls them, and tallies 'r' occurrences into
+  `solution.json`. Ralph's analog of fast-rlm's asyncio.gather example.
+- `examples/podcast.sh` — single Ralph reading the Lex Fridman podcast
+  transcripts CSV (downloaded from Kaggle into the workspace) to summarize
+  what the first 5 ML guests said about AGI. Long-context exploration via
+  grep/read — ported from fast-rlm.
 
 Each script prefixes per-Ralph output by id and tees to `logs/<id>.log`; Ctrl-C
 stops everything. Each example uses its own bus dir (`./bus_solo`, `./bus_sudoku`,
-`./bus_multi`) so they don't interfere if you run more than one. Edit
-`ws_*/prompt.md` after the first run to customize the prompts.
+`./bus_multi`, `./bus_rcount`, `./bus_podcast`) so they don't interfere if you
+run more than one. Edit `ws_*/prompt.md` after the first run to customize the
+prompts.
 
 ## Run multiple Ralphs manually
 

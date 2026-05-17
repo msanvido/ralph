@@ -1,4 +1,35 @@
-# Benchmark: HumanEval subset
+# Benchmarks
+
+End-to-end evaluations of Ralph on public datasets. Three are bundled:
+
+- `run.py` — HumanEval subset (code generation, auto-graded). Details below.
+- `longbench.py` — single example from THUDM/LongBench narrativeqa (long-context QA, manual grade).
+- `oolong_synth.py` — single example from oolongbench/oolong-synth (long-context structured QA, exact-string hint).
+
+The two long-context benchmarks need the `datasets` extra:
+
+```sh
+pip install -e '.[benchmarks]'
+
+python benchmark/longbench.py                           # idx=140 by default
+python benchmark/longbench.py --idx 100 --idx 140
+python benchmark/oolong_synth.py                        # idx=100 default
+python benchmark/oolong_synth.py --task-group counting --idx 5
+```
+
+Per-example workspaces are created under `benchmark/_runs/longbench_idx<N>/`
+and `benchmark/_runs/oolong_synth_idx<N>/`. Ralph reads the context from
+`context.txt` and writes its answer to `solution.txt`. Grading is largely
+manual — answers are free-form text — so the runner just prints Ralph's
+answer next to the dataset reference. oolong-synth answers are often exact,
+so the runner also reports an exact-string match count as a rough hint.
+
+Ported from [fast-rlm](https://github.com/avbiswas/fast-rlm)'s benchmarks of
+the same name.
+
+---
+
+## HumanEval subset
 
 A small subset of [HumanEval](https://github.com/openai/human-eval) (16 tasks
 spanning the difficulty range) to measure Ralph end-to-end: prompt-to-passing-tests.

@@ -13,6 +13,11 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.optional-dependencies]
+benchmarks = [
+    "datasets>=2.16",
+]
+
 [project.scripts]
 ralph = "ralph.cli:main"
 

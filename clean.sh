@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Remove every artifact the examples in examples/ create:
 #   - per-example workspaces (ws_solo, ws_expert, ws_novice, ws_cryptanalyst,
-#     ws_decoder, ws_fib, ws_prime, ws_classifier, ws_watcher_multi)
-#   - per-example bus dirs (bus_solo, bus_sudoku, bus_cipher, bus_multi)
+#     ws_decoder, ws_fib, ws_prime, ws_classifier, ws_watcher_multi,
+#     ws_fruits, ws_animals, ws_states, ws_counter, ws_podcast)
+#   - per-example bus dirs (bus_solo, bus_sudoku, bus_cipher, bus_multi,
+#     bus_rcount, bus_podcast)
 #   - the legacy ./bus dir from the manual walkthrough in README.md
 #   - the shared ./logs/ directory
 #
