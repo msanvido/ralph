@@ -8,64 +8,34 @@
 #
 # Demonstrates: ask_ralph(..., description=...), top-3 ranking on the responder,
 # and expertise-based routing surfaced in the peer preamble.
-# Ctrl-C stops everything. Per-ralph logs in ./logs/.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-
-PY=".venv/bin/python"
-[ -x "$PY" ] || PY="python3"
-
 BUS=./bus_multi
-rm -rf "$BUS"
-mkdir -p ws_fib ws_prime ws_classifier ws_watcher_multi logs
+source "$(dirname "$0")/_lib.sh"
 
-[ -f ws_fib/prompt.md ] || cat > ws_fib/prompt.md <<'EOF'
+seed_prompt ws_fib <<'EOF'
 For each number in this list, decide whether it is a Fibonacci number.
 Save your answers to solution.txt as one line per number: "<n>: yes" or "<n>: no".
 
 Numbers: 13, 21, 32, 55, 64, 89, 100, 144
 EOF
 
-[ -f ws_prime/prompt.md ] || cat > ws_prime/prompt.md <<'EOF'
+seed_prompt ws_prime <<'EOF'
 For each number in this list, decide whether it is prime.
 Save your answers to solution.txt as one line per number: "<n>: yes" or "<n>: no".
 
 Numbers: 7, 8, 13, 19, 23, 25, 51, 89, 97
 EOF
 
-[ -f ws_classifier/prompt.md ] || cat > ws_classifier/prompt.md <<'EOF'
+seed_prompt ws_classifier <<'EOF'
 Classify the number 89: is it a Fibonacci number, a prime, both, or neither?
 Save the answer to solution.txt as a single line: "89: <fibonacci|prime|both|neither>".
 EOF
 
-[ -f ws_watcher_multi/prompt.md ] || cat > ws_watcher_multi/prompt.md <<'EOF'
+seed_prompt ws_watcher_multi <<'EOF'
 Track the progress of every other ralph on the bus. Maintain workspace/dashboard.md
 with one line per ralph: id, expertise, iteration, done, last status.
 mark_done when every other ralph reports done=true.
 EOF
-
-cleanup() {
-  trap - INT TERM
-  echo
-  echo "🛑 stopping all ralphs..."
-  kill 0
-}
-trap cleanup INT TERM
-
-launch() {
-  local id="$1" ws="$2"
-  shift 2
-  (
-    "$PY" -u -m ralph \
-      --workspace "$ws" \
-      --prompt "$ws/prompt.md" \
-      --bus-dir "$BUS" \
-      --ralph-id "$id" \
-      "$@" 2>&1 \
-    | awk -v id="$id" '{ print "[" id "] " $0; fflush() }' \
-    | tee "logs/$id.log"
-  ) &
-}
 
 # Classifier waits for BOTH specialists to finish before asking. The watcher
 # runs in parallel — its whole purpose is to observe the others mid-flight.

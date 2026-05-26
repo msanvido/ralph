@@ -6,17 +6,11 @@
 # Ralph to find what the first 5 ML-researcher guests said about AGI. This
 # is the "long context exploration" demo — the CSV is many MB; Ralph has to
 # grep/parse rather than load it all at once.
-#
-# Output is prefixed by id and tee'd to logs/podcast.log. Ctrl-C stops it.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-
-PY=".venv/bin/python"
-[ -x "$PY" ] || PY="python3"
-
 BUS=./bus_podcast
-rm -rf "$BUS"
-mkdir -p ws_podcast/data logs
+source "$(dirname "$0")/_lib.sh"
+
+mkdir -p ws_podcast/data
 
 DATA_FILE="ws_podcast/data/lex_fridman_dataset.csv"
 ZIP_PATH="ws_podcast/data/lex-fridman-podcast-transcript.zip"
@@ -55,7 +49,7 @@ fi
 bytes=$(wc -c < "$DATA_FILE" | tr -d ' ')
 echo "📚 dataset ready: $DATA_FILE ($bytes bytes)"
 
-[ -f ws_podcast/prompt.md ] || cat > ws_podcast/prompt.md <<'EOF'
+seed_prompt ws_podcast <<'EOF'
 Find what the first 5 Machine Learning guests had to say about AGI in the
 Lex Fridman Podcast. Not all guests are ML guests — focus on established
 researchers known for contributions in AI. Return summaries of what the
@@ -82,9 +76,7 @@ Stay within your iteration budget — don't try to read the whole CSV at once.
 Stream and grep.
 EOF
 
-"$PY" -u -m ralph \
-  --workspace ws_podcast \
-  --prompt ws_podcast/prompt.md \
-  --bus-dir "$BUS" \
-  --ralph-id podcast 2>&1 \
-  | tee logs/podcast.log
+launch podcast ws_podcast
+
+echo "🌈 launched 1 ralph (podcast). Log in ./logs/podcast.log. Ctrl-C to stop."
+wait

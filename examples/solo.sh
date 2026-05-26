@@ -2,19 +2,11 @@
 # Single-Ralph example — Conway's Game of Life.
 # No bus cooperation; just one Ralph wrecking an empty workspace into a working
 # implementation. The simplest demo of the iterate-until-done loop.
-#
-# Ctrl-C stops it. Workspace persists in ./ws_solo/, log in ./logs/solo.log.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-
-PY=".venv/bin/python"
-[ -x "$PY" ] || PY="python3"
-
 BUS=./bus_solo
-rm -rf "$BUS"
-mkdir -p ws_solo logs
+source "$(dirname "$0")/_lib.sh"
 
-[ -f ws_solo/prompt.md ] || cat > ws_solo/prompt.md <<'EOF'
+seed_prompt ws_solo <<'EOF'
 Implement Conway's Game of Life in pure Python.
 
 1. Write life.py with a `Grid` class supporting:
@@ -33,9 +25,7 @@ Implement Conway's Game of Life in pure Python.
    logic is correct.
 EOF
 
-"$PY" -u -m ralph \
-  --workspace ws_solo \
-  --prompt ws_solo/prompt.md \
-  --bus-dir "$BUS" \
-  --ralph-id solo 2>&1 \
-  | tee logs/solo.log
+launch solo ws_solo
+
+echo "🌈 launched 1 ralph (solo). Log in ./logs/solo.log. Ctrl-C to stop."
+wait

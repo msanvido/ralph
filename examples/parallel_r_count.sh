@@ -8,19 +8,11 @@
 # Ported from fast-rlm/examples/parallel_r_count.py, which spawns subagents
 # in parallel via asyncio.gather. Ralph's analog is the bus: multiple peers
 # work concurrently, the aggregator collects via ask_ralph(id, "tools", ...).
-#
-# Output is prefixed by id and tee'd to logs/<id>.log. Ctrl-C stops everything.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-
-PY=".venv/bin/python"
-[ -x "$PY" ] || PY="python3"
-
 BUS=./bus_rcount
-rm -rf "$BUS"
-mkdir -p ws_fruits ws_animals ws_states ws_counter logs
+source "$(dirname "$0")/_lib.sh"
 
-[ -f ws_fruits/prompt.md ] || cat > ws_fruits/prompt.md <<'EOF'
+seed_prompt ws_fruits <<'EOF'
 You are the fruits specialist. Build a Python tool that returns a list of
 exactly 25 distinct fruit names so other ralphs can fetch it via ask_ralph.
 
@@ -32,7 +24,7 @@ exactly 25 distinct fruit names so other ralphs can fetch it via ask_ralph.
 3. mark_done when the tool is in place.
 EOF
 
-[ -f ws_animals/prompt.md ] || cat > ws_animals/prompt.md <<'EOF'
+seed_prompt ws_animals <<'EOF'
 You are the animals specialist. Build a Python tool that returns a list of
 exactly 25 distinct animal names so other ralphs can fetch it via ask_ralph.
 
@@ -43,7 +35,7 @@ exactly 25 distinct animal names so other ralphs can fetch it via ask_ralph.
 3. mark_done when the tool is in place.
 EOF
 
-[ -f ws_states/prompt.md ] || cat > ws_states/prompt.md <<'EOF'
+seed_prompt ws_states <<'EOF'
 You are the US-states specialist. Build a Python tool that returns a list of
 exactly 25 distinct US state names so other ralphs can fetch it via ask_ralph.
 
@@ -54,7 +46,7 @@ exactly 25 distinct US state names so other ralphs can fetch it via ask_ralph.
 3. mark_done when the tool is in place.
 EOF
 
-[ -f ws_counter/prompt.md ] || cat > ws_counter/prompt.md <<'EOF'
+seed_prompt ws_counter <<'EOF'
 Build a dictionary mapping each name (string) to the count of the letter 'r'
 (case-insensitive) in that name. Pull the three source lists from peers — do
 NOT generate them yourself.
@@ -77,29 +69,6 @@ Workflow:
 5. Save the dict as JSON to solution.json (sorted keys, indent=2).
 6. mark_done.
 EOF
-
-cleanup() {
-  trap - INT TERM
-  echo
-  echo "🛑 stopping all ralphs..."
-  kill 0
-}
-trap cleanup INT TERM
-
-launch() {
-  local id="$1" ws="$2"
-  shift 2
-  (
-    "$PY" -u -m ralph \
-      --workspace "$ws" \
-      --prompt "$ws/prompt.md" \
-      --bus-dir "$BUS" \
-      --ralph-id "$id" \
-      "$@" 2>&1 \
-    | awk -v id="$id" '{ print "[" id "] " $0; fflush() }' \
-    | tee "logs/$id.log"
-  ) &
-}
 
 # Three generators run in parallel. Counter blocks on all three so its first
 # ask hits a populated inventory.
