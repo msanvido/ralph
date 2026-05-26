@@ -2,13 +2,29 @@
 
 > "Everything is awesome — when it's all Python!"
 
-A coding agent that re-feeds the same prompt every iteration until it marks the task
-done. Each iteration starts with a fresh context — the agent rediscovers progress by
-reading files in the workspace.
+A coding agent that treats **tool creation** and **tool sharing** as first-class primitives. Ralph re-feeds the same prompt every iteration until it marks the task done; each iteration starts with a fresh context and rediscovers progress by reading the workspace.
 
-Named after [Wreck-It Ralph](https://en.wikipedia.org/wiki/Wreck-It_Ralph). Themed after
-["Everything Is Awesome"](https://en.wikipedia.org/wiki/Everything_Is_Awesome) because,
-well — everything here is Python.
+Inspired by [fast-rlm](https://github.com/avbiswas/fast-rlm). Named after [Wreck-It Ralph](https://en.wikipedia.org/wiki/Wreck-It_Ralph). Themed after ["Everything Is Awesome"](https://en.wikipedia.org/wiki/Everything_Is_Awesome) because, well — everything here is Python.
+
+## Why this design
+
+What made humans dominant wasn't raw intelligence — it was the *combination* of two abilities: we **build tools**, and we **share them**. A single hominid who knaps a flint blade is a curiosity. A tribe that knaps blades, passes the technique forward, and trades them with neighbors is an evolutionary force.
+
+AI systems have been climbing the same ladder, one rung at a time:
+
+1. **Code generation.** Mostly mastered.
+2. **Function calling with pre-defined tools.** Mostly mastered — [Hermes](https://huggingface.co/datasets/NousResearch/hermes-function-calling-v1) and friends made structured tool invocation reliable.
+3. **Tool *creation* on demand.** Emerging — [ToolMaker](https://arxiv.org/abs/2502.11705) and related work showed agents can author their own Python tools mid-task.
+
+No system to date has put tool creation **and** tool sharing together as first-class primitives. Tools are still treated as private artifacts of a single agent — built ad hoc, used once, lost when the conversation ends. Ralph's bet: make both operations primitive. Tools are `.py` files in the agent's workspace. Peers can request tools by description over a shared bus, and the source code transfers verbatim with no LLM round-trip on the responder side. The substrate that holds the tools is the agent's own filesystem.
+
+### Where Ralph sits in the lineage
+
+- **ReAct / CodeReAct** — reason, act, observe; tools are the actions. Usually pre-defined; if built, they live inside one rollout.
+- **[Recursive Language Models](https://arxiv.org/abs/2512.24601)** (Zhang, Kraska, Khattab, 2025) — treat the prompt as a Python variable inside a REPL the LLM controls. Scales context past the window in one inference.
+- **Ralph** — brings the tools themselves *inside* the agent's substrate. State, tools, and recipes are all `.py` files on disk. Other agents can request those files by description and receive verbatim source.
+
+The shift is from "the LLM calls tools" to "the LLM lives in a workshop, builds tools, files them on a shelf, and borrows from the shelf next door."
 
 ## Setup
 
@@ -53,6 +69,25 @@ echo "Build a tic-tac-toe game with tests, then mark_done." > prompt.md
 
 That's it. Ralph reads `./prompt.md`, works in `./workspace/`, learns into `./workspace/memory/`,
 and joins the bus at `./bus/` with id = workspace dir name (`workspace`).
+
+### Tool creation, live
+
+Single Ralph, no peers. Prompt: solve one sudoku puzzle.
+
+```
+🔁 Iteration 1
+🕹️  I'll build a backtracking sudoku solver and use it.
+  🔧 write({"path": "tools/sudoku_solver.py", ...})
+  📎 {"status": "written", "bytes": 2069}
+  🧰 dynamic tools available: sudoku_solver
+  🔧 sudoku_solver({"puzzle": "003020600...300"})
+  📎 483921657967345821251876493548132976...382
+  🔧 write({"path": "solution.txt", "content": "483921657..."})
+  🔧 mark_done({})
+✅ Done after 1 iterations.
+```
+
+Ralph wrote a tool, the harness reloaded `workspace/tools/` so the new tool was callable on the very next turn, the tool ran, the answer was saved. Verified — all clues preserved, rows / columns / 3×3 boxes valid. No `import` ever happened; the `sudoku_solver` came into existence because the agent needed it, lives as `tools/sudoku_solver.py`, and will be LRU-evicted from the workspace once it falls below the cap.
 
 ## Examples
 
@@ -120,6 +155,34 @@ Add more peers the same way — e.g., a watcher Ralph that just `list_ralphs()` 
 `peek_ralph(id)` each iteration and writes a dashboard. See `examples/multi_expert.sh`
 for a 4-Ralph setup with a watcher.
 
+### Tool sharing, live
+
+Two Ralphs share a `bus/` directory. The expert builds a sudoku solver and marks done. The novice gets a fresh puzzle and is told to ask the expert.
+
+```
+🔁 Iteration 1 (novice)
+🕹️  Getting the solver from the expert peer.
+  🔧 ask_ralph({"id": "expert", "category": "tools",
+                "description": "sudoku solver"})
+  📎 {"request_id": "ec4571baa730", "status": "sent"}
+```
+
+The expert's bus daemon — a background thread, no LLM round-trip — ranks its own filesystem artifacts by keyword overlap with `"sudoku solver"`, picks the top match, and writes the response. The response is the *verbatim source* of `tools/sudoku_solver.py`. The novice's `check_response` auto-installs it into its own `workspace/tools/` on the next turn. Two agents, one file transferred over a shared directory, no central server, no package manager.
+
+When the expert is offline, the bus fails gracefully and the agent falls back to building its own:
+
+```
+  🔧 ask_ralph({"id": "expert", ...})
+  📎 {"error": "target unreachable: ... 'bus/expert.fifo'"}
+🕹️  Expert isn't reachable. No problem — I'll build my own.
+  🔧 write({"path": "tools/sudoku_solver.py", ...})
+  🔧 sudoku_solver({"puzzle": "500080049..."})
+  📎 513687249849521637...723
+✅ Done after 1 iterations.
+```
+
+"Find help, or become the help." The next Ralph to attack a similar problem will see *this* one on the bus and can borrow from it. Tools accumulate the way blades accumulated in a flint-knapping village.
+
 ## What's available on the bus
 
 Each Ralph sees these tools:
@@ -144,6 +207,10 @@ every other Ralph's status is collected and prepended to the prompt as a `## Pee
 the bus` section. The system prompt's first step is "route asks by expertise — if a peer
 specializes in what you need, fetch from them via `ask_ralph(id, category, description)`
 before writing your own." Reuse beats reinvention.
+
+## Storage is Python source
+
+Tools are `.py` files with a `TOOL = {...}` dict and a `run()` function. Recipes (heuristic memory) are `.py` files with a `MEMORY = {...}` dict. Indices are `INDEX = [...]`. The loader `importlib`s them. The persisted form is the same Python objects the agent works with, frozen to text — readable with `cat`, diffable in git, hand-editable, runnable. No JSON, no pickle, no SQLite, no vector database. Sharing reduces to copying a file; verification reduces to reading it.
 
 Memory layout (one file per recipe, mirroring the per-tool pattern):
 
@@ -216,8 +283,20 @@ want a different ceiling.
                     and expertise extraction rely on it. Validated at startup.
 ```
 
+## Benchmarks
+
+End-to-end evaluations on a HumanEval subset (16 tasks), single-example LongBench narrativeqa, and oolong-synth (the long-context benchmarks ported from [fast-rlm](https://github.com/avbiswas/fast-rlm)). See [`benchmark/README.md`](benchmark/README.md) for how to run them. A representative observation from a recent run: on `HumanEval/34` with `claude-haiku-4-5`, Ralph wrote a correct one-line solution (`return sorted(set(l))`) — verified against the canonical HumanEval `check` — but never called `mark_done`, and the runner cut it off at 600s. The code was right; the contract wasn't completed. That failure mode is informative: the discipline gap is at the meta-protocol level (when to declare a task done), not at the toolmaking level.
+
 ## Tests
 
 ```sh
 .venv/bin/python -m unittest test_ralph
 ```
+
+## Inspirations and related work
+
+- **[fast-rlm](https://github.com/avbiswas/fast-rlm)** — the spark for this project. Several of Ralph's example workloads (`parallel_r_count`, `podcast`) and the long-context benchmarks (LongBench narrativeqa, oolong-synth) are ported from fast-rlm. fast-rlm is itself a fast, hackable Pythonic implementation of recursive language models — go read it.
+- **[Geoffrey Huntley's "Ralph Wiggum" loop](https://ghuntley.com/ralph/)** — the observation that *just re-running the same prompt until done* captures a surprising amount of agentic work, no clever planner required. Ralph keeps this core and adds the surrounding machinery: dynamic tools, distilled recipes, peer cooperation over a bus, expertise routing, fail-fast model validation.
+- **[Recursive Language Models](https://arxiv.org/abs/2512.24601)** (Zhang, Kraska, Khattab, 2025) — manipulating context symbolically through code rather than consuming it end-to-end. Ralph is the orthogonal sibling: code-as-substrate across iterations, where RLM is code-as-substrate within one inference. The two compose cleanly — `config.completion` could in principle be bound to `rlm.completion`.
+- **[Hermes function-calling](https://huggingface.co/datasets/NousResearch/hermes-function-calling-v1)** and **[ToolMaker](https://arxiv.org/abs/2502.11705)** — pointing the way toward agentic tool authorship. Ralph extends the line by making *sharing* the newly-authored tools a runtime primitive, not a manual artifact-export step.
+- **Coding agents (Claude Code, Cursor, Aider, OpenHands, …)** — solve the long-horizon coding-task problem with more sophisticated UIs and tool-use surfaces. Ralph is intentionally tiny — a few hundred lines you can read in one sitting — and keeps a few opinionated design choices the bigger systems generally don't: (1) every iteration is a *cold start* on the LLM side, with the filesystem as the only memory; (2) recipes are *Python source*, not a vector store; (3) peer cooperation is file-based, so a Ralph crashing or being `kill -9`'d doesn't break anyone else.
