@@ -120,6 +120,125 @@ class LoadDynamicToolsTests(unittest.TestCase):
         self.assertEqual([s.get("name") for s in schemas], ["dup"])
         self.assertEqual(len(dispatch), 1)
 
+    def test_non_literal_tool_loads_but_warns(self):
+        # Callable locally (exec sees the computed dict), but invisible to AST-based
+        # peer ranking — the loader must say so.
+        self._write("dyn.py", (
+            'NAME = "dyn"\n'
+            'TOOL = {"name": NAME, "description": "x", '
+            '"input_schema": {"type": "object", "properties": {}}}\n'
+            'def run(**kw): return "ok"\n'
+        ))
+        schemas, dispatch, warnings = tools_mod.load_dynamic_tools()
+        self.assertIn("dyn", dispatch)
+        self.assertTrue(any("not a pure literal" in w for w in warnings))
+
+    def test_edited_tool_reloads_fresh(self):
+        """Editing a tool file between loads must surface the NEW behavior —
+        no stale module may survive the reload (sys.modules is busted per load)."""
+        self._write("shout.py", VALID_TOOL)
+        _, dispatch, _ = tools_mod.load_dynamic_tools()
+        self.assertEqual(dispatch["shout"](text="hi"), {"shouted": "HI"})
+        self._write("shout.py", VALID_TOOL.replace(".upper()", ".lower()"))
+        _, dispatch, _ = tools_mod.load_dynamic_tools()
+        self.assertEqual(dispatch["shout"](text="HI"), {"shouted": "hi"})
+
+
+class ReadPyLiteralTests(unittest.TestCase):
+    """read_py_literal extracts metadata via AST — never by executing the file."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, body: str) -> Path:
+        p = self.dir / "f.py"
+        p.write_text(body)
+        return p
+
+    def test_extracts_dict_literal(self):
+        p = self._write('TOOL = {"name": "x", "n": 1}\n')
+        self.assertEqual(tools_mod.read_py_literal(p, "TOOL"), {"name": "x", "n": 1})
+
+    def test_never_executes_the_file(self):
+        # Top-level code that would blow up on exec must be irrelevant to the read.
+        p = self._write('raise RuntimeError("boom")\nTOOL = {"name": "x"}\n')
+        self.assertEqual(tools_mod.read_py_literal(p, "TOOL"), {"name": "x"})
+
+    def test_returns_none_on_syntax_error(self):
+        p = self._write("def broken(:\n")
+        self.assertIsNone(tools_mod.read_py_literal(p, "TOOL"))
+
+    def test_returns_none_when_name_missing(self):
+        p = self._write("OTHER = 1\n")
+        self.assertIsNone(tools_mod.read_py_literal(p, "TOOL"))
+
+    def test_returns_none_for_non_literal_value(self):
+        p = self._write('NAME = "x"\nTOOL = {"name": NAME}\n')
+        self.assertIsNone(tools_mod.read_py_literal(p, "TOOL"))
+
+    def test_roundtrips_write_py_literal(self):
+        p = self.dir / "lru.py"
+        tools_mod.write_py_literal(p, "LRU", {"a.py": 1.5})
+        self.assertEqual(tools_mod.read_py_literal(p, "LRU"), {"a.py": 1.5})
+
+
+class ScoreKeywordOverlapTests(unittest.TestCase):
+    def test_exact_token_overlap(self):
+        self.assertEqual(tools_mod.score_keyword_overlap("sudoku solver", "sudoku solver tool"), 2)
+
+    def test_stemming_matches_inflected_forms(self):
+        # 'solver' vs 'solving', 'puzzles' vs 'puzzle' — should both count.
+        self.assertEqual(
+            tools_mod.score_keyword_overlap("sudoku solver puzzles", "solving a sudoku puzzle"), 3)
+
+    def test_short_tokens_ignored(self):
+        self.assertEqual(tools_mod.score_keyword_overlap("do it", "do it now"), 0)
+
+    def test_no_overlap(self):
+        self.assertEqual(tools_mod.score_keyword_overlap("csv parsing", "sudoku solver"), 0)
+
+
+class CompletionRetryTests(unittest.TestCase):
+    """config.completion_with_retry retries transient errors, re-raises fatal ones
+    immediately. It lives in config so EVERY LLM call path (iteration loop, memory
+    select/learn, expertise extraction) shares the same fault tolerance."""
+
+    def test_transient_error_retried_then_succeeds(self):
+        ok = MagicMock()
+        with patch.object(config, "completion", side_effect=[RuntimeError("blip"), ok]), \
+             patch("ralph.config.time.sleep"):
+            result = config.completion_with_retry(model="m", messages=[])
+        self.assertIs(result, ok)
+
+    def test_fatal_error_not_retried(self):
+        import litellm
+        err = litellm.AuthenticationError(message="boom", model="m", llm_provider="test")
+        with patch.object(config, "completion", side_effect=err) as mock:
+            with self.assertRaises(litellm.AuthenticationError):
+                config.completion_with_retry(model="m", messages=[])
+        self.assertEqual(mock.call_count, 1)
+
+    def test_gives_up_after_max_retries(self):
+        with patch.object(config, "completion", side_effect=RuntimeError("down")) as mock, \
+             patch("ralph.config.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                config.completion_with_retry(model="m", messages=[])
+        self.assertEqual(mock.call_count, config.COMPLETION_RETRIES)
+
+
+class ParseArgsTests(unittest.TestCase):
+    def test_max_iterations_default_none(self):
+        args = ralph.parse_args([])
+        self.assertIsNone(args.max_iterations)
+
+    def test_max_iterations_parsed(self):
+        args = ralph.parse_args(["--max-iterations", "7"])
+        self.assertEqual(args.max_iterations, 7)
+
 
 class ToOpenAIToolTests(unittest.TestCase):
     def test_anthropic_format_normalized(self):
@@ -442,7 +561,9 @@ class MemoryTests(unittest.TestCase):
 
     def test_select_swallows_api_errors(self):
         memory.append_memory({"recipes": [self._l("x")]})
-        with patch.object(config, "completion", side_effect=RuntimeError("boom")):
+        # Clamp retries so the retry wrapper doesn't sleep through backoff here.
+        with patch.object(config, "completion", side_effect=RuntimeError("boom")), \
+             patch.object(config, "COMPLETION_RETRIES", 1):
             self.assertEqual(memory.select_relevant_memories("task"), "")
 
     def test_learn_from_iteration_skips_empty(self):
@@ -954,6 +1075,19 @@ class FulfillPeerRequestTests(unittest.TestCase):
         self.assertIn("sudoku_solver.py", result["files"])
         self.assertNotIn("_helper.py", result["files"])
         self.assertNotIn("notpy.txt", result["files"])
+
+    def test_tools_with_poisoned_top_level_still_shareable(self):
+        """Ranking/sharing must not execute tool files (it runs on the bus listener
+        thread). A tool whose top level raises is still discoverable and its source
+        still transfers verbatim — only calling it locally would fail."""
+        (self.tools_dir / "sudoku_solver.py").write_text(
+            'raise RuntimeError("must not run during ranking")\n'
+            + self._tool_source("sudoku_solver", "Solve sudoku puzzles"))
+        result = ralph.fulfill_peer_request(
+            "tools", {"from": "x", "description": "sudoku solver"},
+        )
+        self.assertIn("sudoku_solver.py", result["files"])
+        self.assertIn("must not run during ranking", result["files"]["sudoku_solver.py"])
 
     def test_tools_caps_at_top_k(self):
         for i in range(5):

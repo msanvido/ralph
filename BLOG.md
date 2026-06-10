@@ -1,20 +1,59 @@
-# Ralph: a coding agent in a few hundred lines
+# Ralph: tools all the way down
+
+What made humans dominant wasn't raw intelligence — it was the *combination*
+of two abilities: we **build tools**, and we **share them**. A single hominid
+who knaps a flint blade is a curiosity. A tribe that knaps blades, passes the
+technique forward, and trades them with neighbors is an evolutionary force.
+
+Ralph is a coding agent, in a few hundred lines of Python, built around that
+observation: tool *creation* and tool *sharing* as first-class primitives.
+This post is the design rationale — what problem it attacks, the bet it
+makes, how the machinery works, and what the early evidence says.
+
+---
+
+## The problem: agents that forget, tools that die
 
 Most agent harnesses keep a growing message history. Each turn appends to it;
 the agent reasons over the whole transcript. This works, but it has problems:
 the transcript grows monotonically and blows past context windows; a bad turn
 poisons every subsequent turn; restarting means replaying the whole transcript.
 
-Ralph takes the opposite stance: **every iteration is a brand-new conversation
-with a fresh model context**. The agent's "memory" is whatever it left on disk
-in `workspace/`. To continue work, the agent uses `ls` and `read` to rediscover
-state from scratch. It doesn't remember what it tried before, but it sees what's
-in the workspace right now — which is the only thing that actually matters for
-"can I make progress next?"
+There's a second, quieter problem. When today's agents *do* write helper code
+mid-task — a parser, a solver, a validation routine — that code is a private
+artifact of one rollout. It is used once and lost when the conversation ends.
+The next agent attacking the same class of problem re-derives it from scratch.
+Every flint blade is knapped, used, and dropped in the river.
 
-Multiple Ralphs can share a file/FIFO bus and discover each other automatically.
-Each Ralph publishes its expertise (auto-extracted from its prompt at startup)
-and its inventory of tools and recipes; peers route asks by expertise.
+AI systems have been climbing the tool ladder one rung at a time: code
+generation (mostly mastered), function calling against pre-defined tools
+(mostly mastered), tool creation on demand (emerging — ToolMaker, Voyager's
+skill library). But creation and *sharing* haven't been put together as
+primitives of the same loop. That's the gap Ralph aims at.
+
+## The insight: make the filesystem the substrate
+
+Ralph takes the opposite stance from transcript-keeping harnesses: **every
+iteration is a brand-new conversation with a fresh model context**. The
+agent's "memory" is whatever it left on disk in `workspace/`. To continue
+work, the agent uses `ls` and `read` to rediscover state from scratch. It
+doesn't remember what it tried before, but it sees what's in the workspace
+right now — which is the only thing that actually matters for "can I make
+progress next?"
+
+Once the filesystem is the substrate, tool creation and tool sharing stop
+being exotic:
+
+- A **tool** is a `.py` file in `workspace/tools/` with a `TOOL = {...}` dict
+  and a `run()` function. The loop reloads the directory after every write, so
+  a tool the agent authors mid-response is callable on its very next tool use.
+- **Sharing** is copying a file. Peers request tools by *description* over a
+  shared bus; the responder ranks its own artifacts by relevance and sends the
+  top matches as verbatim source — no LLM round-trip on the responder side, no
+  retyping (and therefore no corruption) of the source bytes.
+
+The shift is from "the LLM calls tools" to "the LLM lives in a workshop,
+builds tools, files them on a shelf, and borrows from the shelf next door."
 
 ---
 
@@ -49,8 +88,6 @@ Three loops, nested:
 3. The tool-reload step is implicit: any `write` / `edit` / `check_response`
    reloads `W/tools/` so a tool created mid-response is callable on the very
    next `tool_use`.
-
----
 
 ## Pictured
 
@@ -90,9 +127,16 @@ flowchart TB
 **Python source is the storage format.** State on disk isn't an opaque blob —
 it's `.py` files. Dynamic tools are modules with `TOOL = {...}` and a `run()`
 function. Recipes are files with `MEMORY = {...}`. Indices are
-`INDEX = [...]`. The loader `importlib`s them, so the persisted form is the
-same Python objects the agent works with, just frozen to text — readable,
-diffable, hand-editable, runnable. No JSON, no pickle, no SQLite.
+`INDEX = [...]`. The persisted form is the same Python objects the agent works
+with, just frozen to text — readable, diffable, hand-editable, runnable. No
+JSON, no pickle, no SQLite.
+
+The format encodes a sharp line: **metadata is a literal, behavior is code.**
+The `TOOL` / `MEMORY` / `INDEX` dicts are pure literals, read back via
+`ast.literal_eval` without executing the file; only `run()` is ever executed,
+and only when the tool is loaded for calling. That split is what lets the bus
+rank and ship a peer's tools — including ones whose `run()` would crash —
+without running a single line of them.
 
 **Writes are eager.** Every tool the agent saves, every recipe the learn pass
 extracts, every LRU touch hits disk the moment it's produced. There's no
@@ -109,7 +153,8 @@ relevant iteration.
 **The bus is filesystem + FIFOs, not a server.** Multiple Ralphs share a
 directory. Each writes its `<id>.status` file after every iteration; each
 reads a named pipe for incoming requests; responses are written as JSON
-files. Auto-fulfillment runs on a daemon thread — when a peer's `ask_ralph`
+files (atomically — tmp + rename — so a reader never sees a half-flushed
+payload). Auto-fulfillment runs on a daemon thread — when a peer's `ask_ralph`
 arrives, the bus reads our own filesystem (top-K matches by keyword overlap
 on the requester's description) and writes back a response without ever
 consulting the LLM. Tool transfers are byte-verbatim because they never go
@@ -124,11 +169,56 @@ asks them to do. If no peer specializes in your problem, you solve it
 yourself, and the next ralph attacking a similar task will find *you* on
 the bus. Find help, or become the help.
 
-**No bash, no shell, no test runner.** Ralph writes Python; verification is
-the agent's responsibility. This is a deliberate constraint — it forces
-solutions to be correct-by-construction rather than verified-by-bash. (It
-also means a `kill -9` mid-iteration leaves a workspace in a consistent
-state.)
+**No bash, no shell, no test runner — on purpose.** This deserves more than a
+passing mention, because it looks like a missing feature and is actually the
+load-bearing constraint. Ralph writes Python; it cannot execute arbitrary
+commands. Three things fall out of that:
+
+1. *The sandbox is trivial.* The only enforcement surface is `safe_path` (no
+   escaping `workspace/`) and the dynamic-tool loader. There's no command
+   allowlist to maintain, no shell-injection surface, no container required.
+   An agent that can run `bash` needs a sandbox built around it; an agent
+   that can only read and write files inside one directory *is* its own
+   sandbox, modulo the tools it writes (which run in-process — the trust
+   boundary is the workspace, not the tool).
+2. *Crash consistency.* Every state change is a file write. `kill -9` at any
+   instant leaves the workspace in a state the next iteration can pick up by
+   reading it.
+3. *It forces correct-by-construction.* Without a test runner, the agent
+   can't flail through guess-run-patch cycles; it has to reason about why the
+   code is right. The honest cost: it also can't *confirm* it's right, which
+   shows up in the evidence below as a distinct failure mode — knowing when
+   to declare done. We consider that trade visible and worth it at this
+   scale; an exec tool behind a real sandbox is the obvious fork for anyone
+   who disagrees.
+
+---
+
+## Evidence (early, but pointed)
+
+Bundled benchmarks (`benchmark/`) measure three different things:
+
+- **Raw capability** — a 16-task HumanEval subset, run end-to-end through the
+  loop, plus single examples of LongBench narrativeqa and oolong-synth for
+  long-context navigation via `grep`/`read`.
+- **Tool reuse** (`tool_reuse.py`) — five related text-analysis tasks against
+  one shared workspace, with a fresh-workspace control. Reuse is detected
+  mechanically: a pre-existing tool whose LRU timestamp advanced during a
+  task was actually called.
+- **Sharing** (`multi_ralph.py`) — the sudoku expert/novice demo made
+  quantitative: novice time-to-solution with the expert on the bus vs alone,
+  with the solution machine-verified and the tool transfer confirmed (the
+  novice's `tools/` must contain the expert's file).
+
+The HumanEval runner grades on two axes — *code correct* and *mark_done
+called* — because they fail independently. A representative early run: on
+`HumanEval/34` with `claude-haiku-4-5`, Ralph wrote a correct one-line
+solution (`return sorted(set(l))`), verified against the canonical check —
+but never called `mark_done`, and the runner cut it off. The code was right;
+the contract wasn't completed. That failure mode is informative: the
+discipline gap is at the meta-protocol level (when to declare a task done),
+not at the toolmaking level. The benchmarks now count it as its own category
+rather than burying it in "failed."
 
 ---
 
@@ -144,6 +234,20 @@ dynamic tools, distilled recipes, peer cooperation over a bus, expertise
 routing, fail-fast model validation.
 
 [rw]: https://ghuntley.com/ralph/
+
+**Code as the agent harness.** [Ning et al., 2026][harness] survey the shift
+from code-as-output to code-as-*substrate* in agent systems, across three
+layers: the harness interface, harness mechanisms (planning, memory, tool
+use, feedback), and harness scaling (multi-agent coordination via shared code
+artifacts). Their tool-use taxonomy — function-oriented,
+environment-interaction, verification-driven, workflow-orchestration — frames
+what Ralph does: agents that *author* reusable tools, in the lineage of
+Voyager's ever-growing skill library and BOSS's synthesized skill chains,
+rather than merely calling fixed APIs. Ralph adds the dimension those systems
+lack: peer-to-peer tool transfer, where one agent's codified skill becomes
+another agent's callable tool without an LLM round-trip.
+
+[harness]: https://arxiv.org/abs/2605.18747
 
 **Coding agents.** Claude Code, Cursor's agent mode, Aider, OpenHands, and
 others all solve the long-horizon coding-task problem with much more
@@ -187,3 +291,24 @@ are `.py` files in a specific shape, peers are processes pointing at the
 same directory, memory selection runs an extra forced-tool LLM call per
 iteration. The opinions are what make the codebase fit in your head; if you
 need configurability beyond what's there, a framework is the better tool.
+
+---
+
+## What's next
+
+- **Scale the sharing experiments.** The multi-Ralph benchmark is one puzzle,
+  one pair. The interesting regime is a *village*: many Ralphs, overlapping
+  domains, tools accumulating over days. Does the shelf converge on a few
+  good blades, or fill with near-duplicates the keyword ranker can't tell
+  apart?
+- **Better artifact retrieval.** Keyword overlap with light stemming is the
+  current ranking for both peer asks and a peer's own shelf. It's
+  transparent and dependency-free, but it will be the first thing to break
+  at village scale.
+- **Close the mark_done gap.** The most consistent failure isn't bad code,
+  it's not declaring done. Candidate fixes: a self-check pass before
+  `mark_done` is accepted, or a cheap verifier Ralph on the bus whose only
+  expertise is "checking other Ralphs' DONE claims."
+- **Compose with RLM.** Bind `config.completion` to an RLM-style recursive
+  completion so a single iteration can digest inputs far beyond the context
+  window, while the outer loop keeps handling tasks far beyond one inference.

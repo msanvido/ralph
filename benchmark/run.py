@@ -3,27 +3,27 @@
 For each task in humaneval_subset.jsonl:
   1. Spin up a fresh workspace under benchmark/_runs/<task_id>.
   2. Write a prompt.md asking Ralph to complete the function in solution.py.
-  3. Run `python -m ralph` as a subprocess against that workspace.
-  4. After Ralph marks done (or hits MAX_ITERATIONS), import solution.py and
-     run the canonical HumanEval `check(candidate)` against it.
-  5. Report pass/fail + elapsed time.
+  3. Run `python -m ralph --exit-on-done` as a subprocess against that workspace.
+  4. Import solution.py and run the canonical HumanEval `check(candidate)` against
+     it — even when Ralph timed out or never called mark_done, because "the code is
+     right but the contract wasn't completed" is a result we track separately.
+  5. Report per-task: code correctness AND mark_done discipline.
 
 Run:  python benchmark/run.py
       python benchmark/run.py --task HumanEval/0
       python benchmark/run.py --model anthropic/claude-sonnet-4-6
 """
 import argparse
-import importlib.util
 import json
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
+
+from _common import RUNS_DIR, preflight, run_ralph
 
 HERE = Path(__file__).parent
 TASKS_FILE = HERE / "humaneval_subset.jsonl"
-RUNS_DIR = HERE / "_runs"
 
 PROMPT_TEMPLATE = """Implement the function in `solution.py`. The signature and docstring are below;
 keep them verbatim and write the function body. Do NOT modify the tests in `test_solution.py`.
@@ -58,42 +58,7 @@ def slug(task_id: str) -> str:
     return task_id.replace("/", "_").lower()
 
 
-def run_ralph(workspace: Path, prompt: Path, model: str | None) -> tuple[int, float, str]:
-    cmd = [sys.executable, "-m", "ralph",
-           "--workspace", str(workspace),
-           "--prompt", str(prompt),
-           "--bus-dir", str(workspace / "_bus")]
-    if model:
-        cmd += ["--model", model]
-    started = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    # Combine the tail of stdout+stderr so callers can surface real errors
-    # (e.g., a model-validation exit or a startup ImportError) instead of
-    # the misleading "solution.py not found" verifier message.
-    tail = (proc.stdout + proc.stderr).strip()[-1500:]
-    return proc.returncode, time.time() - started, tail
-
-
-def preflight() -> None:
-    """Fail fast if `<sys.executable> -m ralph --help` doesn't even start. Otherwise
-    every task would spin up a workspace just to die on import with the failure
-    hidden inside captured stderr."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "ralph", "--help"],
-        capture_output=True, text=True, timeout=20,
-    )
-    if proc.returncode != 0:
-        msg = (proc.stderr + proc.stdout).strip()[-1000:]
-        sys.exit(
-            f"`{sys.executable} -m ralph --help` failed (rc={proc.returncode}).\n"
-            f"Most likely the Python you're running with doesn't have ralph installed.\n"
-            f"Try: .venv/bin/python benchmark/run.py {' '.join(sys.argv[1:])}\n"
-            f"(or activate the venv first.)\n\n"
-            f"Subprocess output:\n{msg}"
-        )
-
-
-def verify(workspace: Path, entry_point: str) -> tuple[bool, str]:
+def verify(workspace: Path) -> tuple[bool, str]:
     """Import the candidate's solution and run the bundled `check` against it."""
     workspace = workspace.resolve()
     if not (workspace / "solution.py").exists():
@@ -107,7 +72,7 @@ def verify(workspace: Path, entry_point: str) -> tuple[bool, str]:
     return False, (proc.stderr or proc.stdout)[-500:]
 
 
-def run_task(task: dict, model: str | None) -> dict:
+def run_task(task: dict, model: str | None, timeout: int) -> dict:
     name = slug(task["task_id"])
     ws = RUNS_DIR / name
     if ws.exists():
@@ -119,28 +84,31 @@ def run_task(task: dict, model: str | None) -> dict:
     prompt_path.write_text(PROMPT_TEMPLATE.format(**task))
     (ws / "test_solution.py").write_text(TEST_TEMPLATE.format(**task))
 
-    # Run Ralph. Daemonize the bus so it doesn't pollute the parent dir.
     print(f"  ▶ running ralph...", flush=True)
     try:
-        rc, elapsed, tail = run_ralph(ws, prompt_path, model)
+        rc, elapsed, tail = run_ralph(ws, prompt_path, model, timeout=timeout,
+                                      extra_args=["--exit-on-done"])
+        timed_out = False
     except subprocess.TimeoutExpired:
-        return {"task": task["task_id"], "passed": False, "elapsed": 600.0,
-                "reason": "ralph timed out (600s)"}
+        rc, elapsed, tail = -1, float(timeout), ""
+        timed_out = True
 
-    # If Ralph exited non-zero, surface its actual output. Don't bother running the
-    # verifier — its "solution.py not found" message would just hide the real cause.
-    if rc != 0:
-        return {
-            "task": task["task_id"], "passed": False, "elapsed": elapsed,
-            "reason": f"ralph exited rc={rc}; tail of output:\n{tail}",
-            "ralph_rc": rc,
-        }
+    # rc 0 = mark_done was called; rc 2 = max iterations without it; timeout = it
+    # never decided. Verify the code in ALL cases — a correct solution without a
+    # mark_done is the meta-protocol failure we want to count, not hide.
+    marked_done = rc == 0
+    code_passed, reason = verify(ws)
+    if not code_passed and not marked_done and tail:
+        reason = f"{reason}\nralph rc={rc}{' (timeout)' if timed_out else ''}; tail:\n{tail}"
 
-    # Verify against the bundled HumanEval test.
-    passed, reason = verify(ws, task["entry_point"])
     return {
-        "task": task["task_id"], "passed": passed, "elapsed": elapsed,
-        "reason": reason if not passed else "", "ralph_rc": rc,
+        "task": task["task_id"],
+        "passed": code_passed and marked_done,
+        "code_passed": code_passed,
+        "marked_done": marked_done,
+        "timed_out": timed_out,
+        "elapsed": elapsed,
+        "reason": "" if code_passed and marked_done else reason,
     }
 
 
@@ -148,9 +116,11 @@ def main():
     p = argparse.ArgumentParser(description="Run HumanEval subset against Ralph.")
     p.add_argument("--model", type=str, default=None, help="LiteLLM model string")
     p.add_argument("--task", type=str, default=None, help="Run only this task id (e.g. HumanEval/0)")
+    p.add_argument("--timeout", type=int, default=600,
+                   help="Per-task subprocess timeout in seconds (default 600)")
     args = p.parse_args()
 
-    preflight()
+    preflight("run.py")
 
     tasks = load_tasks()
     if args.task:
@@ -163,20 +133,29 @@ def main():
     results = []
     for task in tasks:
         print(f"\n{'─' * 50}\n▶ {task['task_id']} ({task['entry_point']})")
-        r = run_task(task, args.model)
+        r = run_task(task, args.model, args.timeout)
         results.append(r)
-        symbol = "✅" if r["passed"] else "❌"
+        symbol = "✅" if r["passed"] else ("🟡" if r["code_passed"] else "❌")
         print(f"{symbol} {r['task']} ({r['elapsed']:.1f}s)")
         if not r["passed"]:
-            print(f"  reason: {r['reason']}")
+            print(f"  reason: {r['reason'] or 'code correct but mark_done never called'}")
 
-    print(f"\n{'=' * 50}\nSummary: {sum(r['passed'] for r in results)}/{len(results)} passed")
+    full = sum(r["passed"] for r in results)
+    code_only = sum(r["code_passed"] and not r["marked_done"] for r in results)
+    print(f"\n{'=' * 50}")
+    print(f"Summary: {full}/{len(results)} passed (code correct + mark_done called)")
+    if code_only:
+        print(f"         {code_only} more had CORRECT code but never called mark_done")
+        print(f"         (meta-protocol gap: the toolmaking worked; the done-discipline didn't)")
     print(f"{'=' * 50}")
     for r in results:
-        symbol = "✅" if r["passed"] else "❌"
-        # Show only the first line of the reason in the summary (full tail
-        # already printed per-task above).
-        first_line = r["reason"].splitlines()[0] if r["reason"] else ""
+        symbol = "✅" if r["passed"] else ("🟡" if r["code_passed"] else "❌")
+        flags = []
+        if r["code_passed"] and not r["marked_done"]:
+            flags.append("code OK, no mark_done")
+        if r["timed_out"]:
+            flags.append("timeout")
+        first_line = r["reason"].splitlines()[0] if r["reason"] and not flags else "; ".join(flags)
         print(f"  {symbol} {r['task']:<20} {r['elapsed']:>6.1f}s  {first_line[:60]}")
 
 

@@ -210,7 +210,7 @@ before writing your own." Reuse beats reinvention.
 
 ## Storage is Python source
 
-Tools are `.py` files with a `TOOL = {...}` dict and a `run()` function. Recipes (heuristic memory) are `.py` files with a `MEMORY = {...}` dict. Indices are `INDEX = [...]`. The loader `importlib`s them. The persisted form is the same Python objects the agent works with, frozen to text — readable with `cat`, diffable in git, hand-editable, runnable. No JSON, no pickle, no SQLite, no vector database. Sharing reduces to copying a file; verification reduces to reading it.
+Tools are `.py` files with a `TOOL = {...}` dict (a pure literal) and a `run()` function. Recipes (heuristic memory) are `.py` files with a `MEMORY = {...}` dict. Indices are `INDEX = [...]`. The loader follows an execute/parse split: metadata is read via `ast.literal_eval` without ever executing the file (so ranking and sharing tools on the bus can't run anyone's top-level code), while `run()` is executed only when the tool is loaded for calling. The persisted form is the same Python objects the agent works with, frozen to text — readable with `cat`, diffable in git, hand-editable, runnable. No JSON, no pickle, no SQLite, no vector database. Sharing reduces to copying a file; verification reduces to reading it.
 
 Memory layout (one file per recipe, mirroring the per-tool pattern):
 
@@ -281,11 +281,22 @@ want a different ceiling.
 --model NAME        LiteLLM model string (default: openrouter/qwen/qwen3-coder).
                     The model MUST support forced tool_choice — Ralph's memory
                     and expertise extraction rely on it. Validated at startup.
+--max-iterations N  Stop after N iterations without a DONE marker (default: 50)
+--exit-on-done      Exit when the task completes instead of idling on the bus.
+                    Exit code 0 = mark_done was called; 2 = max iterations hit
+                    without one. Used by the benchmark runners.
 ```
 
 ## Benchmarks
 
-End-to-end evaluations on a HumanEval subset (16 tasks), single-example LongBench narrativeqa, and oolong-synth (the long-context benchmarks ported from [fast-rlm](https://github.com/avbiswas/fast-rlm)). See [`benchmark/README.md`](benchmark/README.md) for how to run them. A representative observation from a recent run: on `HumanEval/34` with `claude-haiku-4-5`, Ralph wrote a correct one-line solution (`return sorted(set(l))`) — verified against the canonical HumanEval `check` — but never called `mark_done`, and the runner cut it off at 600s. The code was right; the contract wasn't completed. That failure mode is informative: the discipline gap is at the meta-protocol level (when to declare a task done), not at the toolmaking level.
+Five bundled evaluations — see [`benchmark/README.md`](benchmark/README.md) for details:
+
+- **HumanEval subset** (`run.py`, 16 tasks) — raw capability, end-to-end through the loop. Graded on two axes: *code correct* and *mark_done called*, because they fail independently.
+- **Tool reuse** (`tool_reuse.py`) — five related tasks against one shared workspace; measures whether tools built early actually get *called* later (via LRU timestamps), with a fresh-workspace control (`--fresh`).
+- **Multi-Ralph sharing** (`multi_ralph.py`) — novice time-to-solution on a sudoku with vs without an expert on the bus, solution machine-verified, tool transfer confirmed.
+- **LongBench narrativeqa / oolong-synth** (`longbench.py`, `oolong_synth.py`) — long-context navigation via grep/read, ported from [fast-rlm](https://github.com/avbiswas/fast-rlm).
+
+A representative observation from an early run: on `HumanEval/34` with `claude-haiku-4-5`, Ralph wrote a correct one-line solution (`return sorted(set(l))`) — verified against the canonical HumanEval `check` — but never called `mark_done`. The code was right; the contract wasn't completed. The discipline gap is at the meta-protocol level (when to declare a task done), not at the toolmaking level — which is why the runner now reports "code correct but no mark_done" as its own category.
 
 ## Tests
 
@@ -299,4 +310,5 @@ End-to-end evaluations on a HumanEval subset (16 tasks), single-example LongBenc
 - **[Geoffrey Huntley's "Ralph Wiggum" loop](https://ghuntley.com/ralph/)** — the observation that *just re-running the same prompt until done* captures a surprising amount of agentic work, no clever planner required. Ralph keeps this core and adds the surrounding machinery: dynamic tools, distilled recipes, peer cooperation over a bus, expertise routing, fail-fast model validation.
 - **[Recursive Language Models](https://arxiv.org/abs/2512.24601)** (Zhang, Kraska, Khattab, 2025) — manipulating context symbolically through code rather than consuming it end-to-end. Ralph is the orthogonal sibling: code-as-substrate across iterations, where RLM is code-as-substrate within one inference. The two compose cleanly — `config.completion` could in principle be bound to `rlm.completion`.
 - **[Hermes function-calling](https://huggingface.co/datasets/NousResearch/hermes-function-calling-v1)** and **[ToolMaker](https://arxiv.org/abs/2502.11705)** — pointing the way toward agentic tool authorship. Ralph extends the line by making *sharing* the newly-authored tools a runtime primitive, not a manual artifact-export step.
+- **[Code as Agent Harness](https://arxiv.org/abs/2605.18747)** (Ning et al., 2026) — a survey of the shift from code-as-output to code-as-*substrate* in agent systems. Their tool-use taxonomy frames what Ralph does: agents that *author* reusable tools (in the lineage of Voyager's skill library and BOSS's skill chains) rather than merely calling fixed APIs. Ralph adds the dimension those systems lack — peer-to-peer tool transfer, where one agent's codified skill becomes another's callable tool without an LLM round-trip.
 - **Coding agents (Claude Code, Cursor, Aider, OpenHands, …)** — solve the long-horizon coding-task problem with more sophisticated UIs and tool-use surfaces. Ralph is intentionally tiny — a few hundred lines you can read in one sitting — and keeps a few opinionated design choices the bigger systems generally don't: (1) every iteration is a *cold start* on the LLM side, with the filesystem as the only memory; (2) recipes are *Python source*, not a vector store; (3) peer cooperation is file-based, so a Ralph crashing or being `kill -9`'d doesn't break anyone else.

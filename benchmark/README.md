@@ -1,10 +1,23 @@
 # Benchmarks
 
-End-to-end evaluations of Ralph on public datasets. Three are bundled:
+End-to-end evaluations of Ralph. Five are bundled:
 
 - `run.py` — HumanEval subset (code generation, auto-graded). Details below.
+- `tool_reuse.py` — five related text-analysis tasks against ONE shared workspace;
+  measures whether tools built for task 1 actually get called on tasks 2–5
+  (detected via LRU timestamps). `--fresh` runs the no-carryover control.
+- `multi_ralph.py` — the sudoku expert/novice demo made quantitative: novice
+  time-to-solution with the expert on the bus vs alone, plus whether the novice
+  really installed the expert's tool (machine-verified solution).
 - `longbench.py` — single example from THUDM/LongBench narrativeqa (long-context QA, manual grade).
 - `oolong_synth.py` — single example from oolongbench/oolong-synth (long-context structured QA, exact-string hint).
+
+The first three measure what makes Ralph *different* — tool creation, tool
+reuse across tasks, and peer sharing — not just raw code generation.
+
+All runners launch Ralph with `--exit-on-done`, so the subprocess exit code
+distinguishes "called mark_done" (0) from "ran out of iterations" (2); shared
+plumbing lives in `_common.py`.
 
 The two long-context benchmarks need the `datasets` extra:
 
@@ -62,6 +75,33 @@ correct-by-construction or they fail). It's a much harder bar than direct
 function-completion scoring (HumanEval pass@1 typically reports the model's
 ability to fill in a function given a prompt, with no agent loop). Ralph has
 to manage its own workspace, decide when it's done, and not regress.
+
+Results are graded on TWO axes, reported separately:
+
+- **code correct** — the canonical HumanEval `check` passes against `solution.py`
+  (verified even when Ralph timed out or never called mark_done).
+- **mark_done called** — Ralph itself decided the task was complete.
+
+A ✅ needs both. A 🟡 means the code was right but Ralph never declared done —
+the meta-protocol gap (when to stop) rather than a toolmaking failure. Early
+runs suggest this gap is a real, distinct failure mode worth tracking.
+
+## Tool reuse and multi-Ralph
+
+```sh
+python benchmark/tool_reuse.py            # shared workspace — reuse enabled
+python benchmark/tool_reuse.py --fresh    # control — fresh workspace per task
+python benchmark/multi_ralph.py           # bus + solo conditions, timed
+```
+
+`tool_reuse.py` reports, per task, which tools were created and which
+*pre-existing* tools were called (their `tools/_lru.py` timestamp advanced).
+Compare total time and pass rate against `--fresh` to see what persistence buys.
+
+`multi_ralph.py` prints novice time-to-solution with and without the expert,
+and flags the case where the novice solved the puzzle without fetching the
+expert's tool (fast, but not sharing). Single puzzle, single run — repeat
+before quoting numbers.
 
 ## Tasks
 

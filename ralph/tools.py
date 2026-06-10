@@ -1,9 +1,11 @@
 """All tool definitions: builtin schemas + handlers, dynamic loader, dispatch."""
-import importlib.util
+import ast
 import json
 import re
+import sys
 import time
 import traceback
+import types
 from pathlib import Path
 
 from . import config
@@ -14,18 +16,51 @@ TOOLS_LRU_LIMIT = 100  # max number of dynamic tool files retained in workspace/
 # === Shared helpers (also used by memory.py / ralph.py) ===
 
 def load_py_module(unique_name: str, path: Path):
-    """Import a .py file as a module. Returns the module, or None on import error."""
-    spec = importlib.util.spec_from_file_location(unique_name, path)
-    module = importlib.util.module_from_spec(spec)
+    """Execute a .py file as a fresh module. Returns the module, or None on error.
+
+    Deliberately bypasses importlib's loaders: their __pycache__ validation keys on
+    (mtime-in-seconds, size), so a tool edited twice within one second to the same
+    byte length would silently load STALE bytecode. Compiling the source text on
+    every call guarantees the agent always runs what's on disk right now."""
+    sys.modules.pop(unique_name, None)  # in case a previous load self-registered
+    module = types.ModuleType(unique_name)
+    module.__file__ = str(path)
     try:
-        spec.loader.exec_module(module)
+        code = compile(path.read_text(), str(path), "exec")
+        exec(code, module.__dict__)
     except Exception:
         return None
     return module
 
 
+def read_py_literal(path: Path, name: str):
+    """Extract a top-level `NAME = <literal>` from a .py file WITHOUT executing it.
+
+    The execute/parse split is deliberate: metadata (TOOL, MEMORY, INDEX, LRU) is a
+    pure literal we can read via AST, while behavior (run()) is code we exec only
+    when the tool is about to be called. Reads happen in places where running
+    arbitrary top-level code would be wrong — most importantly the bus listener
+    thread, which ranks every tool on the shelf each time a peer asks.
+
+    Returns the literal's value, or None if the file is unreadable/unparseable,
+    the name is absent, or the value isn't a pure literal."""
+    try:
+        tree = ast.parse(path.read_text())
+    except (SyntaxError, ValueError, OSError):
+        return None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)):
+            try:
+                return ast.literal_eval(node.value)
+            except ValueError:
+                return None
+    return None
+
+
 def write_py_literal(path: Path, name: str, value, sort_keys: bool = False) -> None:
-    """Write a JSON-serializable value as a top-level Python assignment (`NAME = ...`)."""
+    """Write a JSON-serializable value as a top-level Python assignment (`NAME = ...`).
+    Always a pure literal — the counterpart read_py_literal depends on that."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{name} = " + json.dumps(value, indent=4, sort_keys=sort_keys) + "\n")
 
@@ -41,10 +76,8 @@ class LRUStore:
         path = self._path_fn()
         if not path.exists():
             return {}
-        module = load_py_module(f"_ralph_lru_{path.parent.name}", path)
-        if module is None:
-            return {}
-        return dict(getattr(module, "LRU", {}) or {})
+        lru = read_py_literal(path, "LRU")
+        return dict(lru) if isinstance(lru, dict) else {}
 
     def save(self, lru: dict) -> None:
         write_py_literal(self._path_fn(), "LRU", lru, sort_keys=True)
@@ -63,24 +96,42 @@ def user_tool_files() -> list[Path]:
 
 
 def iter_user_tools():
-    """Yield (path, tool_def) for each user tool with a parseable TOOL = {...} dict."""
+    """Yield (path, tool_def) for each user tool with a parseable TOOL = {...} literal.
+
+    Reads via AST, never executes the file: this runs on the bus listener thread
+    whenever a peer asks, so a tool with a slow or hostile top level must not get
+    to run here. A tool whose run() would crash is still rankable and shareable —
+    the receiver gets verbatim source either way."""
     for p in user_tool_files():
-        module = load_py_module(f"_peer_tool_{p.stem}", p)
-        if module is None:
-            continue
-        tool_def = getattr(module, "TOOL", None)
+        tool_def = read_py_literal(p, "TOOL")
         if isinstance(tool_def, dict):
             yield p, tool_def
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Cheap suffix stemming so "solver"/"solving"/"solve" and "puzzles"/"puzzle" land on the
+# same token. Longest-first so "solving" strips "ing" before "s" would even be tried.
+_STEM_SUFFIXES = ("ing", "tion", "ers", "er", "ed", "es", "s")
+
+
+def _stem(token: str) -> str:
+    for suffix in _STEM_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            token = token[: -len(suffix)]
+            break
+    # Normalize the trailing 'e' so "puzzles"→"puzzl" and "puzzle"→"puzzl" agree.
+    if token.endswith("e") and len(token) >= 4:
+        token = token[:-1]
+    return token
+
 
 def score_keyword_overlap(query: str, text: str) -> int:
-    """Count distinct alphanumeric tokens (length >= 3) shared between query and text.
-    Used by peer-ask fulfillment to rank tools/lessons by relevance to a request description."""
+    """Count distinct stemmed alphanumeric tokens (length >= 3) shared between query and
+    text. Used by peer-ask fulfillment to rank tools/lessons by relevance to a request
+    description; stemming lets 'sudoku solver' match 'solving sudoku puzzles'."""
     def toks(s: str) -> set[str]:
-        return {t for t in _TOKEN_RE.findall(s.lower()) if len(t) >= 3}
+        return {_stem(t) for t in _TOKEN_RE.findall(s.lower()) if len(t) >= 3}
     return len(toks(query) & toks(text))
 
 
@@ -485,6 +536,13 @@ def load_dynamic_tools() -> tuple[list[dict], dict, list[str]]:
         if not name or name in BUILTIN_NAMES or name in dispatch:
             warnings.append(f"{path.name} has invalid/duplicate name {name!r} — skipping")
             continue
+        if read_py_literal(path, "TOOL") is None:
+            # Callable locally, but peer ranking reads TOOL via AST without executing
+            # the file, so a computed dict makes the tool invisible to ask_ralph.
+            warnings.append(
+                f"{path.name}: TOOL is not a pure literal — peers can't discover it; "
+                "rewrite TOOL as a plain dict of constants"
+            )
         schemas.append(tool)
         dispatch[name] = _wrap_with_lru_touch(run, path.name)
     return schemas, dispatch, warnings

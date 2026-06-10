@@ -19,12 +19,8 @@ Install:  pip install -e '.[benchmarks]'
 import argparse
 import shutil
 import subprocess
-import sys
-import time
-from pathlib import Path
 
-HERE = Path(__file__).parent
-RUNS_DIR = HERE / "_runs"
+from _common import RUNS_DIR, preflight, run_ralph
 
 PROMPT_TEMPLATE = """\
 Answer the question below using the labeled context window in `context.txt`
@@ -45,40 +41,6 @@ mark_done once `solution.txt` is written.
 """
 
 
-def preflight() -> None:
-    proc = subprocess.run(
-        [sys.executable, "-m", "ralph", "--help"],
-        capture_output=True, text=True, timeout=20,
-    )
-    if proc.returncode != 0:
-        msg = (proc.stderr + proc.stdout).strip()[-1000:]
-        sys.exit(
-            f"`{sys.executable} -m ralph --help` failed (rc={proc.returncode}).\n"
-            f"Try: .venv/bin/python benchmark/oolong_synth.py {' '.join(sys.argv[1:])}\n\n"
-            f"Subprocess output:\n{msg}"
-        )
-    try:
-        import datasets  # noqa: F401
-    except ImportError:
-        sys.exit(
-            "The `datasets` package is required for this benchmark.\n"
-            "Install with: pip install -e '.[benchmarks]'"
-        )
-
-
-def run_ralph(workspace: Path, prompt: Path, model: str | None, timeout: int) -> tuple[int, float, str]:
-    cmd = [sys.executable, "-m", "ralph",
-           "--workspace", str(workspace),
-           "--prompt", str(prompt),
-           "--bus-dir", str(workspace / "_bus")]
-    if model:
-        cmd += ["--model", model]
-    started = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    tail = (proc.stdout + proc.stderr).strip()[-1500:]
-    return proc.returncode, time.time() - started, tail
-
-
 def run_one(example: dict, idx: int, model: str | None, timeout: int) -> dict:
     name = f"oolong_synth_idx{idx}"
     ws = RUNS_DIR / name
@@ -93,7 +55,8 @@ def run_one(example: dict, idx: int, model: str | None, timeout: int) -> dict:
     ctx_len = len(example["context_window_text_with_labels"])
     print(f"  ▶ running ralph (context: {ctx_len:,} chars)...", flush=True)
     try:
-        rc, elapsed, tail = run_ralph(ws, prompt_path, model, timeout)
+        rc, elapsed, tail = run_ralph(ws, prompt_path, model, timeout=timeout,
+                                      extra_args=["--exit-on-done"])
     except subprocess.TimeoutExpired:
         return {"idx": idx, "elapsed": float(timeout), "answer": "", "reason": f"timed out ({timeout}s)"}
 
@@ -118,7 +81,7 @@ def main():
     args = p.parse_args()
     indices = args.idx or [100]
 
-    preflight()
+    preflight("oolong_synth.py", needs_datasets=True)
     from datasets import load_dataset
     print("Loading oolongbench/oolong-synth split=test ...", flush=True)
     ds = load_dataset("oolongbench/oolong-synth", split="test")
