@@ -1,4 +1,5 @@
 """Shared mutable singletons. ralph.main() mutates these at startup; everything else reads."""
+import time
 from pathlib import Path
 
 import litellm
@@ -38,5 +39,36 @@ MEMORY_DIR = WORKSPACE / "memory"
 DONE_MARKER = WORKSPACE / "DONE"
 
 completion = litellm.completion
+
+# Errors that mean the configured model/credentials can't possibly work —
+# rate limits / network blips are NOT in this set and stay transient.
+FATAL_MODEL_ERRORS = (
+    litellm.BadRequestError,
+    litellm.AuthenticationError,
+    litellm.NotFoundError,
+    litellm.PermissionDeniedError,
+)
+
+COMPLETION_RETRIES = 3  # attempts per completion call before giving up
+
+
+def completion_with_retry(**kwargs):
+    """Call `completion`, retrying transient failures with exponential backoff.
+    Fatal misconfiguration is caught by validate_model at startup, so anything
+    that fails here is most likely a rate limit or a network blip — worth a
+    couple of retries. Used by every LLM call path (iteration loop, memory
+    select/learn, expertise extraction)."""
+    for attempt in range(COMPLETION_RETRIES):
+        try:
+            return completion(**kwargs)
+        except FATAL_MODEL_ERRORS:
+            raise
+        except Exception as e:
+            if attempt == COMPLETION_RETRIES - 1:
+                raise
+            delay = 2 ** attempt
+            print(f"  ⚠️  completion failed ({type(e).__name__}); retrying in {delay}s...")
+            time.sleep(delay)
+
 
 bus = None  # bus.Bus instance, set by main()

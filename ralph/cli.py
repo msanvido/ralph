@@ -13,8 +13,6 @@ import sys
 import time
 from pathlib import Path
 
-import litellm
-
 from . import config
 from . import memory
 from . import tools as tools_mod
@@ -54,6 +52,8 @@ Workflow every iteration:
    the same response. Each file must define:
      TOOL = {"name": "...", "description": "...", "input_schema": {...}}
      def run(**kwargs) -> str | dict: ...
+   TOOL must be a PURE LITERAL dict (no variables, f-strings, or computed values) — peers
+   discover your tools by parsing it without executing your file. Behavior goes in run().
    The `run` function executes in Ralph's process; its return value is sent back as the tool
    result (dicts are JSON-encoded). Tool names must be unique and may not shadow the built-ins.
 6. When — and ONLY when — every part of the task is fully complete, call mark_done to signal
@@ -220,7 +220,7 @@ def run_iteration(prompt: str, n: int) -> list[dict]:
     ]
 
     while True:
-        response = config.completion(
+        response = config.completion_with_retry(
             model=config.MODEL,
             max_tokens=8192,
             messages=messages,
@@ -273,15 +273,6 @@ def run_iteration(prompt: str, n: int) -> list[dict]:
     return messages
 
 
-# Errors here mean the configured model/credentials can't possibly work —
-# rate limits / network blips are NOT in this set and stay transient.
-FATAL_MODEL_ERRORS = (
-    litellm.BadRequestError,
-    litellm.AuthenticationError,
-    litellm.NotFoundError,
-    litellm.PermissionDeniedError,
-)
-
 # Used by validate_model. We force this tool to be called — that's the exact same
 # pattern memory.py and extract_expertise rely on, so if the model can't handle it,
 # Ralph won't work, period.
@@ -314,7 +305,7 @@ def validate_model() -> None:
             tools=[_PING_TOOL],
             tool_choice={"type": "function", "function": {"name": "ping"}},
         )
-    except FATAL_MODEL_ERRORS as e:
+    except config.FATAL_MODEL_ERRORS as e:
         print("FAIL")
         print(f"❌ {type(e).__name__}: {e}")
         print("   Ralph requires forced tool_choice support for memory + expertise.")
@@ -372,6 +363,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "Examples: openrouter/deepseek/deepseek-chat-v3.1, "
                         "openrouter/qwen/qwen3-coder, anthropic/claude-sonnet-4-6, "
                         "openai/gpt-4o, gemini/gemini-2.0-flash")
+    p.add_argument("--max-iterations", type=int, default=None, metavar="N",
+                   help=f"Stop after N iterations without a DONE marker "
+                        f"(default: {config.MAX_ITERATIONS}).")
+    p.add_argument("--exit-on-done", action="store_true",
+                   help="Exit when the task completes instead of idling on the bus. "
+                        "Exit code 0 = DONE marker written; 2 = max iterations hit "
+                        "without one. Used by the benchmark runners, where 'did Ralph "
+                        "decide it was done?' is part of what's being measured.")
     return p.parse_args(argv)
 
 
@@ -384,6 +383,8 @@ def main():
     config.DONE_MARKER = config.WORKSPACE / "DONE"
     if args.model:
         config.MODEL = args.model
+    if args.max_iterations:
+        config.MAX_ITERATIONS = args.max_iterations
 
     if not config.PROMPT_FILE.exists():
         print(f"Prompt file not found: {config.PROMPT_FILE.resolve()}")
@@ -431,7 +432,9 @@ def main():
 
     try:
         while True:
-            iterate_until_done()
+            done = iterate_until_done()
+            if args.exit_on_done:
+                sys.exit(0 if done else 2)
             if not config.PROMPT_FILE.exists():
                 print(f"\nPrompt file vanished: {config.PROMPT_FILE}. Stopping.")
                 return
@@ -442,16 +445,18 @@ def main():
         config.bus.close()
 
 
-def iterate_until_done() -> None:
-    """Inner loop: iterate until DONE_MARKER is created or MAX_ITERATIONS is hit."""
+def iterate_until_done() -> bool:
+    """Inner loop: iterate until DONE_MARKER is created or MAX_ITERATIONS is hit.
+    Returns True if the DONE marker was written."""
     for i in range(1, config.MAX_ITERATIONS + 1):
         prompt = config.PROMPT_FILE.read_text()
         messages = run_iteration(prompt, i)
         memory.learn_from_iteration(messages, i)
         if config.DONE_MARKER.exists():
             print(f"\n✅ Done after {i} iterations. Everything is awesome!")
-            return
+            return True
     print(f"\n⏱️  Reached max iterations ({config.MAX_ITERATIONS}) without DONE marker.")
+    return False
 
 
 def wait_until_done_removed(poll_seconds: float = 1.0) -> None:

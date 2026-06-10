@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 
 from . import config
-from .tools import LRUStore, load_py_module, to_openai_tool, write_py_literal
+from .tools import LRUStore, read_py_literal, to_openai_tool, write_py_literal
 
 # Single-element tuple kept for forward compatibility with code that iterates categories
 # (load_index, fulfill_peer_request, etc.). If we ever want a finer split again, this is
@@ -49,26 +49,22 @@ def _write_index(path: Path, index: list[dict]) -> None:
 
 
 def load_index(category: str) -> list[dict]:
-    """Read the per-category index. Returns [{"id", "description"}, ...] or []."""
+    """Read the per-category index. Returns [{"id", "description"}, ...] or [].
+    AST read, not exec — also called from the bus listener thread on peer asks."""
     path = config.MEMORY_DIR / category / "_index.py"
     if not path.exists():
         return []
-    module = load_py_module(f"_ralph_index_{category}", path)
-    if module is None:
-        return []
-    index = getattr(module, "INDEX", None)
+    index = read_py_literal(path, "INDEX")
     return index if isinstance(index, list) else []
 
 
 def load_lesson(category: str, lesson_id: str) -> dict | None:
-    """Read a single lesson file. Returns {"description", "prompt"} or None."""
+    """Read a single lesson file. Returns {"description", "prompt"} or None.
+    AST read, not exec — also called from the bus listener thread on peer asks."""
     path = config.MEMORY_DIR / category / f"{lesson_id}.py"
     if not path.exists():
         return None
-    module = load_py_module(f"_ralph_memory_{category}_{lesson_id}", path)
-    if module is None:
-        return None
-    mem = getattr(module, "MEMORY", None)
+    mem = read_py_literal(path, "MEMORY")
     if not isinstance(mem, dict):
         return None
     return mem
@@ -197,7 +193,7 @@ def _call_forced_tool(
     *, system: str, user: str, tool: dict, tool_name: str, max_tokens: int, label: str,
 ) -> dict | None:
     try:
-        response = config.completion(
+        response = config.completion_with_retry(
             model=config.MODEL,
             max_tokens=max_tokens,
             messages=[

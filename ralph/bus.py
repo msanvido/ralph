@@ -19,6 +19,15 @@ import uuid
 from pathlib import Path
 
 
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON via tmp-file + rename so readers never see a partial file.
+    The bus signals over the FIFO *after* the payload is on disk, but rename is
+    what guarantees the listener can't read a half-flushed request/response."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.rename(path)
+
+
 class Bus:
     def __init__(self, bus_dir: Path, ralph_id: str, fulfill_request=None):
         """fulfill_request(category: str, request: dict) -> dict — called on the listener
@@ -88,10 +97,7 @@ class Bus:
         return items
 
     def write_status(self, status: dict) -> None:
-        path = self.bus_dir / f"{self.id}.status"
-        tmp = path.with_suffix(".status.tmp")
-        tmp.write_text(json.dumps(status))
-        tmp.rename(path)
+        _atomic_write_json(self.bus_dir / f"{self.id}.status", status)
 
     def list_ralphs(self) -> list[str]:
         return sorted(p.stem for p in self.bus_dir.glob("*.status"))
@@ -126,7 +132,7 @@ class Bus:
             "description": description,
             "ts": time.time(),
         }
-        (self.bus_dir / "req" / f"{request_id}.json").write_text(json.dumps(payload))
+        _atomic_write_json(self.bus_dir / "req" / f"{request_id}.json", payload)
         try:
             fd = os.open(str(target_fifo), os.O_WRONLY | os.O_NONBLOCK)
         except OSError as e:
@@ -145,13 +151,12 @@ class Bus:
 
     def respond(self, request_id: str, answer) -> dict:
         """`answer` may be a string or a JSON-able dict — both are written verbatim."""
-        resp_path = self.bus_dir / "resp" / f"{request_id}.json"
-        resp_path.write_text(json.dumps({
+        _atomic_write_json(self.bus_dir / "resp" / f"{request_id}.json", {
             "request_id": request_id,
             "from": self.id,
             "answer": answer,
             "ts": time.time(),
-        }))
+        })
         return {"status": "responded", "request_id": request_id}
 
     def close(self) -> None:

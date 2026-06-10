@@ -42,10 +42,12 @@ iteration and exits if present.
 
 A note on persistence. The "disk" here isn't an opaque blob — it's a tree of
 **Python source files**. Dynamic tools are `.py` modules; lessons are files with
-a `MEMORY = {...}` literal; indices are `INDEX = [...]`. The loader `importlib`s
-them, so the persisted form is the same Python objects the agent works with,
-just frozen to text — readable, diffable, hand-editable, runnable. There's no
-JSON, no pickle, no SQLite; Python source *is* the storage format.
+a `MEMORY = {...}` literal; indices are `INDEX = [...]`. Metadata literals are
+read back via `ast.literal_eval` (no execution); tool `run()` functions are
+executed only when loaded for calling. Either way the persisted form is the
+same Python objects the agent works with, just frozen to text — readable,
+diffable, hand-editable, runnable. There's no JSON, no pickle, no SQLite;
+Python source *is* the storage format.
 
 And writes are eager: every tool the agent saves, every lesson the learn-pass
 extracts, every LRU touch hits disk the moment it's produced. There's no "save
@@ -145,15 +147,30 @@ OpenAI shape, and adds `my_tool` to the tools list. The reload happens after
 every `write` or `edit`, so a tool Ralph writes mid-response is callable in the
 very next `tool_use` of the same response.
 
-The mechanism is just `importlib.util.spec_from_file_location`:
+Loading follows an **execute/parse split**: metadata is read by *parsing*,
+behavior by *executing*.
+
+- `read_py_literal(path, "TOOL")` extracts the `TOOL = {...}` dict via
+  `ast.parse` + `ast.literal_eval` — the file is never executed. This is what
+  peer ranking, the memory loaders, and the LRU store use, so reading a tool's
+  metadata (including on the bus listener thread, where peer asks are
+  fulfilled) can't run a slow or hostile top level. The flip side of the
+  contract: `TOOL` must be a *pure literal* — no variables or f-strings — or
+  peers can't discover the tool (the loader warns when it isn't).
+- `load_py_module` executes the file to get a callable `run()` — only in
+  `load_dynamic_tools`, on the main thread, for tools the agent is about to
+  call. It compiles the source text directly (no `importlib`) so there's no
+  `__pycache__` staleness: an edited tool always runs as it is on disk.
 
 ```python
 # tools.py
 def load_py_module(unique_name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(unique_name, path)
-    module = importlib.util.module_from_spec(spec)
+    sys.modules.pop(unique_name, None)
+    module = types.ModuleType(unique_name)
+    module.__file__ = str(path)
     try:
-        spec.loader.exec_module(module)
+        code = compile(path.read_text(), str(path), "exec")
+        exec(code, module.__dict__)
     except Exception:
         return None
     return module
